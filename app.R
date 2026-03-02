@@ -16,7 +16,7 @@ library(shinymanager)
 library(scrypt)
 library(aws.s3)
 
-#testing git
+#testing github branch
 # --- 1. THEME DEFINITION ---
 my_theme <- create_theme(
   adminlte_color(

@@ -6,7 +6,8 @@ library(shinydashboard)
 library(DT)
 library(dplyr)
 library(readxl)
-library(RMySQL)
+#library(RMySQL)
+library(RMariaDB)
 library(DBI)
 library(uuid)
 library(shinyvalidate)
@@ -61,10 +62,11 @@ consts <- config::get()
 
 get_db_conn <- function() {
   dbConnect(
-    RMySQL::MySQL(),
+    #RMySQL::MySQL(),
+    RMariaDB::MariaDB(),
     dbname = consts$db$db_name,
     host = consts$db$db_host,
-    port = consts$db$db_port,
+    port = as.integer(consts$db$db_port),
     user = consts$db$db_user,
     password = consts$db$db_pass
   )
@@ -146,52 +148,23 @@ get_s3_link <- function(obj_key) {
   return(paste0("s3_cache/", safe_name))
 }
 
-#
-# # --- HELPER: Generate Secure S3 Link (Fixed) ---
-# get_s3_link <- function(obj_key) {
-#   # 1. Get Bucket Name from Environment
-#   bucket_name <- Sys.getenv("S3_BUCKET_NAME")
-#
-#   if (bucket_name == "") {
-#     print("DEBUG S3: Error - S3_BUCKET_NAME env var is missing!")
-#     return("#")
-#   }
-#
-#   if (is.null(obj_key) || is.na(obj_key) || obj_key == "") {
-#     return("#")
-#   }
-#
-#   # 2. Generate URL
-#   url <- tryCatch({
-#     aws.s3::get_object_url(
-#       object = obj_key,
-#       bucket = bucket_name,
-#       expiration = 3600,
-#       https = TRUE
-#     )
-#   }, error = function(e) {
-#     print(paste("DEBUG S3: AWS Error -", e$message))
-#     return("#")
-#   })
-#
-#   return(url)
-# }
+
 
 # --- HELPER: Generate Secure S3 Link (Debug Version) ---
 get_s3_link <- function(obj_key) {
-  # 1. Check if key exists
-  if (is.null(obj_key) || is.na(obj_key) || obj_key == "") {
-    print("DEBUG S3: Error - Object Key is NULL or Empty in Database")
-    return("#")
-  }
-
-  # 2. Check if Bucket Name is loaded
-  if (!exists("S3_BUCKET_NAME") || is.null(S3_BUCKET_NAME)) {
-    print("DEBUG S3: Error - S3_BUCKET_NAME variable is missing!")
-    return("#")
-  }
-
-  print(paste("DEBUG S3: Generating link for key:", obj_key))
+  # # 1. Check if key exists
+  # if (is.null(obj_key) || is.na(obj_key) || obj_key == "") {
+  #   print("DEBUG S3: Error - Object Key is NULL or Empty in Database")
+  #   return("#")
+  # }
+  # 
+  # # 2. Check if Bucket Name is loaded
+  # if (!exists("S3_BUCKET_NAME") || is.null(S3_BUCKET_NAME)) {
+  #   print("DEBUG S3: Error - S3_BUCKET_NAME variable is missing!")
+  #   return("#")
+  # }
+  # 
+  # print(paste("DEBUG S3: Generating link for key:", obj_key))
 
   # 3. Generate URL
   url <- tryCatch({
@@ -210,95 +183,68 @@ get_s3_link <- function(obj_key) {
 }
 
 
-# --- AUTH CHECK FUNCTION ---
-
-# my_auth_check <- function(user, pass) {
-#
-#   # 1. Connect
-#   conn <- tryCatch({ get_db_conn() }, error = function(e) { return(NULL) })
-#
-#   if(is.null(conn)) return(list(result = FALSE))
-#   print("Testing Log in error!")
 
 # Define the authentication function with DEBUG prints
+
 my_auth_check <- function(user, pass) {
   
-  print("------------------------------------------------------")
-  print(paste("DEBUG: 1. Attempting login for user:", user))
   
-  # 1. Connect to Database
-  conn <- tryCatch({
-    get_db_conn()
-  }, error = function(e) {
-    print(paste("DEBUG: CRITICAL - Database connection failed:", e$message))
-    return(NULL)
+  conn <- tryCatch({ 
+    get_db_conn() 
+  }, error = function(e) { 
+    print(paste("CRITICAL DB ERROR:", e$message))
+    return(NULL) 
   })
   
   if (is.null(conn)) {
-    print("DEBUG: Connection is NULL. Returning FALSE.")
+    print("DEBUG: DB Connection Failed because 'conn' is NULL.")
     return(list(result = FALSE))
   }
-  print("DEBUG: 2. DB Connection Successful.")
   
   on.exit(dbDisconnect(conn))
   
-  # 2. Fetch User Data
-  # Note: Explicitly selecting columns to avoid 'unrecognized field type 7' warnings
-  safe_user <- dbEscapeStrings(conn, trimws(user))
-  
-  query <- sprintf(
-    "SELECT user_id, tenant_id, email, password_hash, role FROM users WHERE email = '%s' AND is_active = 1", 
-    safe_user
-  )
-  
-  print(paste("DEBUG: 3. Running Query:", query))
+  # Use RMariaDB parameterized query
+  query <- "SELECT user_id, tenant_id, email, password_hash, role FROM users WHERE email = ? AND is_active = 1"
   
   user_data <- tryCatch({
-    dbGetQuery(conn, query)
+    dbGetQuery(conn, query, params = list(trimws(user)))
   }, error = function(e) {
-    print(paste("DEBUG: SQL Query Failed:", e$message))
+    print(paste("DEBUG: Query error -", e$message))
     return(NULL)
   })
   
-  print(paste("DEBUG: 4. Rows returned:", nrow(user_data)))
-  
   if (is.null(user_data) || nrow(user_data) == 0) {
-    print("DEBUG: Login Failed - No user found with that email.")
+    print("DEBUG: Login Failed - User not found or inactive.")
     return(list(result = FALSE))
   }
   
-  # 3. Verify Password
+  # Verify Password
   db_pass <- user_data$password_hash[1]
-  print(paste("DEBUG: 5. Found stored password hash (Length:", nchar(db_pass), ")"))
+  is_valid <- FALSE
   
   # Check A: Try Scrypt
-  is_valid <- FALSE
-  try({
-    is_valid <- scrypt::verifyPassword(db_pass, pass)
-    print(paste("DEBUG: Scrypt verification result:", is_valid))
-  }, silent = TRUE)
+  try({ is_valid <- scrypt::verifyPassword(db_pass, pass) }, silent = TRUE)
   
-  # Check B: Fallback to Plain Text (Only for migration/testing)
-  if (!is_valid && db_pass == pass) {
-    print("DEBUG: Plain text password matched (Warning: Not Secure)")
+  # Check B: Fallback to Plain Text (RESTORED)
+  if (!is_valid && !is.na(db_pass) && db_pass == pass) {
+    print("DEBUG: Plain text password matched (Warning: Migration mode)")
     is_valid <- TRUE
   }
   
   if (is_valid) {
-    print("DEBUG: 6. SUCCESS! User authenticated.")
-    print("------------------------------------------------------")
+    print("DEBUG: SUCCESS! User authenticated.")
     return(list(
       result = TRUE,
       user = user_data$email,
       permissions = user_data$role,
-      user_info = user_data # Pass full row for tenant_id access later
+      user_info = user_data
     ))
   } else {
-    print("DEBUG: 6. FAILURE! Password incorrect.")
-    print("------------------------------------------------------")
+    print("DEBUG: FAILURE! Incorrect password.")
     return(list(result = FALSE))
   }
 }
+
 
 
 logo_exists <- file.exists("www/town_logo.png")
@@ -338,12 +284,25 @@ ui <- dashboardPage(
         )
       }
     ),
-    sidebarMenu(
-      id = "sidebar_menu",
-      menuItem("Browse Plans", tabName = "plan_data", icon = icon("search")),
-      menuItem("New Data Entry", tabName = "plan_form", icon = icon("plus-circle")),
-      menuItem("User Management", tabName = "user_manage", icon = icon("users-cog"))
-    )
+    # sidebarMenu(
+    #   id = "sidebar_menu",
+    #   menuItem("Browse Plans", tabName = "plan_data", icon = icon("search")),
+    #   menuItem("New Data Entry", tabName = "plan_form", icon = icon("plus-circle")),
+    #   menuItem("User Management", tabName = "user_manage", icon = icon("users-cog"))
+    # )
+    # --- Inside dashboardSidebar ---
+sidebarMenu(
+  id = "tabs",
+  menuItem("Dashboard", tabName = "dashboard", icon = icon("dashboard")),
+  menuItem("New Data Entry", tabName = "plan_form", icon = icon("plus")),
+  menuItem("Search & View", tabName = "plan_data", icon = icon("search")),
+  
+  # New Nested Settings Menu
+  menuItem("Settings", icon = icon("cog"), startExpanded = FALSE,
+           menuSubItem("User Management", tabName = "user_manage", icon = icon("users")),
+           menuSubItem("Street Management", tabName = "street_manage", icon = icon("road"))
+  )
+)
   ),
   dashboardBody(
     use_theme(my_theme),
@@ -490,6 +449,24 @@ ui <- dashboardPage(
             DTOutput("users_table")
           )
         )
+      ),
+      
+      # Street Management Tab
+      tabItem(tabName = "street_manage",
+              fluidRow(
+                box(
+                  title = "Bulk Street Upload", width = 12, status = "primary", solidHeader = TRUE,
+                  helpText("Upload a CSV or Excel file containing a column named 'street_name' to add multiple streets at once."),
+                  fileInput("street_bulk_file", "Choose File", accept = c(".csv", ".xlsx")),
+                  actionButton("process_streets", "Upload Streets", icon = icon("upload"), class = "btn-success")
+                )
+              ),
+              fluidRow(
+                box(
+                  title = "Current Master Street List", width = 12, status = "info",
+                  DTOutput("master_street_table")
+                )
+              )
       )
     )
   )
@@ -502,12 +479,42 @@ server <- function(input, output, session) {
   
   
   # --- NEW: REACTIVE TENANT ID ---
-  current_tenant_id <- reactive({
-    req(res_auth$user_id)
   
-    # We extract the tenant_id from the user info we fetched during login
-    return(res_auth$tenant_id)
+  current_tenant_id <- reactive({
+    # 1. Try the "Fast Way" (Session Memory)
+    if (!is.null(res_auth$user_info) && nrow(res_auth$user_info) > 0) {
+      return(res_auth$user_info$tenant_id[1])
+    }
+    
+    # 2. The "Recovery Way" (Database Lookup)
+    # res_auth$user_id is the value the user typed into the login box
+    uid <- res_auth$user_id 
+    
+    if (!is.null(uid) && uid != "") {
+      conn <- get_db_conn()
+      on.exit(dbDisconnect(conn))
+      
+      # We look for the tenant_id associated with that login ID
+      # This works whether your ID is an email or a username
+      res <- dbGetQuery(conn, "SELECT tenant_id FROM users WHERE email = ? OR user_id = ?", 
+                        params = list(uid, uid))
+      
+      if (nrow(res) > 0) {
+        return(res$tenant_id[1])
+      }
+    }
+    
+    # 3. If they aren't authenticated at all, stop here.
+    # Use cancelOutput = TRUE to prevent errors from flashing in the UI
+    req(FALSE, cancelOutput = TRUE)
   })
+  # current_tenant_id <- reactive({
+  #   req(res_auth$user_info) # Check if user_info exists
+  #   
+  #   # We extract the tenant_id from the user info dataframe we fetched during login
+  #   return(res_auth$user_info$tenant_id)
+  #   print(res_auth$user_info$tenant_id)
+  # })
   
   # --- NEW: MASTER ROLE CHECKER ---
   # This creates a single, safe way to check permissions throughout the app
@@ -547,7 +554,7 @@ server <- function(input, output, session) {
   
   observe({
     req(res_auth$user_id) # Stop here if login fails
-    # You can print a message to console to verify it worked
+    
     
   })
   
@@ -584,10 +591,10 @@ server <- function(input, output, session) {
     
     tryCatch({
       # New Schema: 'streets' table, 'street_name' column
-      t_id <- dbEscapeStrings(conn, current_tenant_id())
-      q <- sprintf("SELECT street_name FROM streets WHERE tenant_id = '%s' ORDER BY street_name", t_id)
       
-      s <- dbGetQuery(conn, q)
+      
+      q <- "SELECT street_name FROM streets WHERE tenant_id = ? ORDER BY street_name"
+      s <- dbGetQuery(conn, q, params = list(current_tenant_id()))
       updateSelectizeInput(session, "search_street", choices = c("", s$street_name))
     }, error = function(e){}, finally = {dbDisconnect(conn)})
   })
@@ -630,22 +637,93 @@ server <- function(input, output, session) {
   
   # --- MAIN FORM: ADD STREET ROW ---
   observeEvent(input$add_row, {
-    row_id <- paste0("row", row_counter() + 1)
-    conn <- get_db_conn(); s_list <- dbReadTable(conn, "streets")$streets; dbDisconnect(conn)
     
-    insertUI(selector = "#dynamicRows", ui = fluidRow(id = row_id,
-                                                      column(5, selectizeInput(paste0("streetname_", row_id), "Street Name:", choices = s_list)),
-                                                      column(5, selectizeInput(paste0("streetfocus_", row_id), "Focus:", choices = c("", "Primary", "Secondary", "Tertiary"))),
-                                                      column(2, actionButton(paste0("delete_", row_id), "", icon = icon("trash"), class = "btn-danger", style = "margin-top: 25px;"))
-    ))
+    
+    # 1. Identity Recovery
+    current_user <- isolate(res_auth$user_id)
+    
+    
+    if (is.null(current_user)) {
+      showNotification("Session Error: Identity not found.", type = "error")
+      return()
+    }
+    
+    # 2. Database Connection
+    conn <- get_db_conn()
+    on.exit(dbDisconnect(conn))
+    
+    
+    # 3. Fetch Tenant ID manually
+    user_data <- dbGetQuery(conn, "SELECT tenant_id FROM users WHERE user_id = ?", 
+                            params = list(current_user))
+    
+    if (nrow(user_data) == 0) {
+      
+      showNotification("Error: User record not found in database.", type = "error")
+      return()
+    }
+    
+    tid <- user_data$tenant_id[1]
+    
+    
+    # 4. Fetch Streets for this Tenant
+    s_list <- dbGetQuery(conn, 
+                         "SELECT DISTINCT street_name FROM streets WHERE tenant_id = ? AND is_active = 1", 
+                         params = list(tid))$street_name
+    
+    if (is.null(s_list)) s_list <- character(0)
+    
+    
+    # 5. UI Generation
+    row_id <- paste0("row", row_counter() + 1)
+    
+    tryCatch({
+      insertUI(
+        selector = "#dynamicRows", 
+        ui = fluidRow(
+          id = row_id,
+          column(5, selectizeInput(paste0("streetname_", row_id), "Street Name:", 
+                                   choices = c("", sort(s_list)),
+                                   options = list(placeholder = "Search/Select a street..."))),
+          column(5, selectizeInput(paste0("streetfocus_", row_id), "Focus:", 
+                                   choices = c("", "Primary", "Secondary", "Tertiary"))),
+          column(2, actionButton(paste0("delete_", row_id), "", 
+                                 icon = icon("trash"), class = "btn-danger", style = "margin-top: 25px;"))
+        )
+      )
+      
+    }, error = function(e) {
+      
+    })
+    
+    # 6. Counter Update
     row_counter(row_counter() + 1)
     values$dynamic_rows <- c(values$dynamic_rows, row_id)
     
+    
+    # 7. Delete logic
     observeEvent(input[[paste0("delete_", row_id)]], {
       removeUI(selector = paste0("#", row_id))
       values$dynamic_rows <- values$dynamic_rows[!values$dynamic_rows %in% row_id]
     })
   })
+  # observeEvent(input$add_row, {
+  #   row_id <- paste0("row", row_counter() + 1)
+  #   conn <- get_db_conn(); s_list <- dbReadTable(conn, "streets")$street_name; dbDisconnect(conn)
+  #   
+  #   insertUI(selector = "#dynamicRows", ui = fluidRow(id = row_id,
+  #                                                     column(5, selectizeInput(paste0("streetname_", row_id), "Street Name:", choices = s_list)),
+  #                                                     column(5, selectizeInput(paste0("streetfocus_", row_id), "Focus:", choices = c("", "Primary", "Secondary", "Tertiary"))),
+  #                                                     column(2, actionButton(paste0("delete_", row_id), "", icon = icon("trash"), class = "btn-danger", style = "margin-top: 25px;"))
+  #   ))
+  #   row_counter(row_counter() + 1)
+  #   values$dynamic_rows <- c(values$dynamic_rows, row_id)
+  #   
+  #   observeEvent(input[[paste0("delete_", row_id)]], {
+  #     removeUI(selector = paste0("#", row_id))
+  #     values$dynamic_rows <- values$dynamic_rows[!values$dynamic_rows %in% row_id]
+  #   })
+  # })
  
   
   
@@ -671,32 +749,17 @@ server <- function(input, output, session) {
       dbBegin(conn) # Start Transaction
       
       # 2. Insert Basic Plan Info
-      # We use sprintf() to inject the cleaned values into the string
-      q_plan <- sprintf(
-        "INSERT INTO plans (tenant_id, plan_number, plan_name, plan_type, department, num_of_pages, num_of_sheets, cabinet_number, drawer_number, plan_in_drawer, town_bid, consulting_firm, scale, engineer_name, engineer_stamp, surveyor_name, surveyor_stamp, content_of_plan, notes, date_on_plan) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-        clean(current_tenant_id()),
-        clean(input$plan_number),
-        clean(input$plan_name),
-        clean(input$plan_type),
-        clean(input$department),
-        clean_num(input$num_pages),
-        clean_num(input$num_sheets),
-        clean(input$cabinet_number),
-        clean(input$drawer_number),
-        clean(input$plan_in_drawer),
-        clean(input$town_bid),
-        clean(input$consulting_firm_id),
-        clean(input$scale),
-        clean(input$engineer_name),
-        clean(input$engineer_stamp),
-        clean(input$surveyor_name),
-        clean(input$surveyor_stamp),
-        clean(input$content_of_plan),
-        clean(input$notes),
-        clean(as.character(input$date_on_plan))
-      )
       
-      dbExecute(conn, q_plan)
+      q_plan <- "INSERT INTO plans (tenant_id, plan_number, plan_name, plan_type, department, num_of_pages, num_of_sheets, cabinet_number, drawer_number, plan_in_drawer, town_bid, consulting_firm, scale, engineer_name, engineer_stamp, surveyor_name, surveyor_stamp, content_of_plan, notes, date_on_plan) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      
+      dbExecute(conn, q_plan, params = list(
+        current_tenant_id(), input$plan_number, input$plan_name, input$plan_type, 
+        input$department, as.numeric(input$num_pages), as.numeric(input$num_sheets), 
+        input$cabinet_number, input$drawer_number, input$plan_in_drawer, 
+        input$town_bid, input$consulting_firm_id, input$scale, 
+        input$engineer_name, input$engineer_stamp, input$surveyor_name, 
+        input$surveyor_stamp, input$content_of_plan, input$notes, as.character(input$date_on_plan)
+      ))
       
       # 3. Get the new Plan ID
       new_plan_id <- dbGetQuery(conn, "SELECT LAST_INSERT_ID() as id")$id[1]
@@ -712,25 +775,28 @@ server <- function(input, output, session) {
           
           if (res$success) {
             # Record in Database
-            # We must also format this query with sprintf
-            q_doc <- sprintf(
-              "INSERT INTO plan_documents (document_id, tenant_id, plan_id, category, display_name, original_file_name, storage_provider, bucket, object_key, mime_type, size_bytes, uploaded_by) VALUES (UUID(), %s, %d, %s, %s, %s, 's3', %s, %s, %s, %s, %s)",
-              clean(current_tenant_id()),
-              new_plan_id,
-              clean(input$doc_category),
-              clean(file_row$name),
-              clean(file_row$name),
-              clean(res$bucket),
-              clean(res$key),
-              clean(file_row$type),
-              clean_num(file_row$size),
-              clean(res_auth$user_id)
-            )
+            q_doc <- "INSERT INTO plan_documents (document_id, tenant_id, plan_id, category, display_name, original_file_name, storage_provider, bucket, object_key, mime_type, size_bytes, uploaded_by) VALUES (UUID(), ?, ?, ?, ?, ?, 's3', ?, ?, ?, ?, ?)"
             
-            dbExecute(conn, q_doc)
+            dbExecute(conn, q_doc, params = list(
+              current_tenant_id(), new_plan_id, input$doc_category, file_row$name, 
+              file_row$name, res$bucket, res$key, file_row$type, 
+              as.numeric(file_row$size), res_auth$user_id
+            ))
+            
+         
           }
         }
       }
+      
+      # res <- dbGetQuery(conn, "SELECT street_id FROM streets WHERE street_name = ?", params =list(st_name))
+      # if(nrow(res) == 0) {
+      #   new_id <- uuid::UUIDgenerate()
+      #   dbExecute(conn, "INSERT INTO streets (street_id, tenant_id, street_name) VALUES (?, ?, ?)", 
+      #             params=list(new_id, current_tenant_id(), st_name))
+      #   st_id_to_use <- new_id
+      # } else {
+      #   st_id_to_use <- res$street_id[1]
+      # }
       
       dbCommit(conn) # Commit Transaction
       showNotification("Plan Saved Successfully!", type="message")
@@ -757,41 +823,23 @@ server <- function(input, output, session) {
   
   # Reactive that handles the filtering logic
   filtered_data <- reactive({
-    data_refresh_trigger() 
+    
+    data_refresh_trigger()
+    
     req(current_tenant_id())
-    
+    print("Debugging filtered_data. Success!")
     conn <- get_db_conn()
-    t_id <- dbEscapeStrings(conn, current_tenant_id())
-    
-    # 1. Get Plans (Filtered by Tenant)
-    # Using 'plan_id' instead of 'unique_planID' as per your new schema
-    #q_plans <- sprintf("SELECT * FROM plans WHERE tenant_id = '%s' ORDER BY plan_id DESC", t_id)
+    on.exit(dbDisconnect(conn))
     
     
     
+    q_plans <- "SELECT p.plan_id, p.plan_number, p.plan_name, p.plan_type, p.department, p.date_on_plan, GROUP_CONCAT(DISTINCT s.street_name ORDER BY s.street_name SEPARATOR ', ') as associated_streets FROM plans p LEFT JOIN plan_streets ps ON p.plan_id = ps.plan_id LEFT JOIN streets s ON ps.street_id = s.street_id WHERE p.tenant_id = ? GROUP BY p.plan_id"
+    plans <- dbGetQuery(conn, q_plans, params = list(current_tenant_id()))
     
-    q_plans <- sprintf("
-  SELECT p.plan_id, p.plan_number, p.plan_name, p.plan_type, p.department, p.date_on_plan,
-         GROUP_CONCAT(DISTINCT s.street_name ORDER BY s.street_name SEPARATOR ', ') as associated_streets
-  FROM plans p
-  LEFT JOIN plan_streets ps ON p.plan_id = ps.plan_id
-  LEFT JOIN streets s ON ps.street_id = s.street_id
-  WHERE p.tenant_id = '%s'
-  GROUP BY p.plan_id
-", dbEscapeStrings(conn, current_tenant_id()))
-    plans <- dbGetQuery(conn, q_plans)
+    q_streets <- "SELECT ps.plan_id, s.street_name, ps.focus FROM plan_streets ps JOIN streets s ON ps.street_id = s.street_id WHERE ps.tenant_id = ?"
+    street_associations <- dbGetQuery(conn, q_streets, params = list(current_tenant_id()))
     
-    # 2. Get Street Associations (Joined to get names)
-    # New Schema: plan_streets links to streets
-    q_streets <- sprintf("
-      SELECT ps.plan_id, s.street_name, ps.focus 
-      FROM plan_streets ps
-      JOIN streets s ON ps.street_id = s.street_id
-      WHERE ps.tenant_id = '%s'", t_id)
-    
-    street_associations <- dbGetQuery(conn, q_streets)
-    
-    dbDisconnect(conn)
+
     
     # --- Step D: Prepare Primary Streets Column ---
     # Note: Using 'plan_id' and 'focus' (lowercase) based on new schema
@@ -844,24 +892,13 @@ server <- function(input, output, session) {
     
     conn <- get_db_conn()
     df <- tryCatch({
-      t_id <- dbEscapeStrings(conn, current_tenant_id())
+      #t_id <- dbEscapeStrings(conn, current_tenant_id())
       
       # FIX: Select specific columns to match what the UI expects
-      # We alias 'role' -> 'permissions' so the rest of your UI code works
-      q <- sprintf("
-        SELECT 
-          user_id,
-          tenant_id,
-          email,
-          full_name,
-          role, 
-          full_name as name, 
-          CAST(is_active AS CHAR) as is_active,
-          created_at
-        FROM users 
-        WHERE tenant_id = '%s'", t_id)
       
-      dbGetQuery(conn, q) 
+      q <- "SELECT user_id, tenant_id, email, full_name, role, full_name as name, CAST(is_active AS CHAR) as is_active, created_at FROM users WHERE tenant_id = ?"
+      dbGetQuery(conn, q, params = list(current_tenant_id()))
+      
     }, error = function(e) {
       print(paste("Query Error:", e$message))
       return(NULL)
@@ -1001,14 +1038,17 @@ server <- function(input, output, session) {
       safe_name   <- dbEscapeStrings(conn, input$new_user_name)
       
       # New Schema Insert
-      query <- sprintf(
-        "INSERT INTO users (user_id, tenant_id, email, password_hash, role, full_name, is_active) 
-         VALUES (UUID(), '%s', '%s', '%s', '%s', '%s', 1)",
-        safe_tenant, safe_user, safe_pass, safe_perm, safe_name
-      )
+      query <- "INSERT INTO users (user_id, tenant_id, email, password_hash, role, full_name, is_active) 
+          VALUES (UUID(), ?, ?, ?, ?, ?, 1)"
       
-      # 3. Execute
-      dbExecute(conn, query)
+      # 3. Execute with params
+      dbExecute(conn, query, params = list(
+        tenant_id,      # Pass the raw tenant ID variable here
+        input$email,    # Pass the raw email input here
+        hashed_pass,    # Pass your hashed password variable here
+        input$role,     # Pass the raw role input here
+        input$name      # Pass the raw full name input here
+      ))
       
       showNotification("User added successfully!", type = "message")
       shinyjs::click("user_refresh_trigger") # Refresh table
@@ -1029,8 +1069,7 @@ server <- function(input, output, session) {
     # We use %in% to allow both "admin" and "super admin" if you have that role
     user_role <- tolower(as.character(res_auth$role))
     
-    # FIX: Corrected print syntax (using paste)
-    print(paste("DEBUG: Edit Triggered. Current Role:", user_role))
+    
     
     if (!user_role %in% c("admin", "super admin")) {
       showNotification("⛔ ACCESS DENIED.", type = "error")
@@ -1039,24 +1078,24 @@ server <- function(input, output, session) {
     
     # 2. Get the User ID from the button ID
     raw_id <- input$edit_user_trigger
-    print(paste("DEBUG: Raw Trigger ID:", raw_id))
+    
     
     # Remove the prefix to get the integer ID
     selected_user_id <- sub("edit_user_", "", raw_id)
-    print(paste("DEBUG: Target User ID:", selected_user_id))
+    
     
     # 3. Fetch current details from DB
     conn <- get_db_conn()
     on.exit(dbDisconnect(conn)) # Ensure disconnect even if errors occur
     
     user_data <- tryCatch({
-      # FIX: Explicitly select columns. 
-      # Do NOT use SELECT * (it breaks on timestamps with RMySQL)
-      query <- sprintf(
-        "SELECT user_id, email, role FROM users WHERE user_id = '%s'", 
-        dbEscapeStrings(conn, selected_user_id)
-      )
-      dbGetQuery(conn, query)
+      # Note: RMariaDB actually handles timestamps perfectly, but explicitly 
+      # selecting columns is still best practice!
+      query <- "SELECT user_id, email, role FROM users WHERE user_id = ?"
+      
+      # Use params instead of dbEscapeStrings
+      dbGetQuery(conn, query, params = list(selected_user_id))
+      
     }, error = function(e) {
       print(paste("DEBUG: SQL Error -", e$message))
       showNotification(paste("Error fetching user:", e$message), type = "error")
@@ -1114,31 +1153,34 @@ server <- function(input, output, session) {
     
     conn <- get_db_conn()
     tryCatch({
-      # Prepare inputs
-      safe_target <- dbEscapeStrings(conn, input$edit_target_user_id)
-      safe_name   <- dbEscapeStrings(conn, input$edit_user_name_input)
-      safe_perm   <- dbEscapeStrings(conn, input$edit_user_perm_input)
+      # 1. NO need to prepare inputs with dbEscapeStrings anymore!
       
       # 2. Construct Query based on whether password changed
       if (input$edit_user_pass_input != "") {
         # CASE A: Update Password + Info
         new_hash <- scrypt::hashPassword(input$edit_user_pass_input)
-        safe_pass <- dbEscapeStrings(conn, new_hash)
         
-        query <- sprintf(
-          "UPDATE users SET `name` = '%s', `permissions` = '%s', `password` = '%s' WHERE `user` = '%s'",
-          safe_name, safe_perm, safe_pass, safe_target
-        )
+        query <- "UPDATE users SET `name` = ?, `permissions` = ?, `password` = ? WHERE `user` = ?"
+        
+        # 3. Execute with params
+        dbExecute(conn, query, params = list(
+          input$edit_user_name_input, 
+          input$edit_user_perm_input, 
+          new_hash, 
+          input$edit_target_user_id
+        ))
+        
       } else {
         # CASE B: Update Info Only (Keep old password)
-        query <- sprintf(
-          "UPDATE users SET `name` = '%s', `permissions` = '%s' WHERE `user` = '%s'",
-          safe_name, safe_perm, safe_target
-        )
+        query <- "UPDATE users SET `name` = ?, `permissions` = ? WHERE `user` = ?"
+        
+        # 3. Execute with params
+        dbExecute(conn, query, params = list(
+          input$edit_user_name_input, 
+          input$edit_user_perm_input, 
+          input$edit_target_user_id
+        ))
       }
-      
-      # 3. Execute
-      dbExecute(conn, query)
       
       showNotification("User updated successfully.", type = "message")
       shinyjs::click("user_refresh_trigger") # Refresh table
@@ -1186,10 +1228,10 @@ server <- function(input, output, session) {
       safe_id <- dbEscapeStrings(conn, input$del_user_id_hidden)
       
       # 2. Construct Query
-      query <- sprintf("DELETE FROM users WHERE user_id = '%s'", safe_id)
+      query <- "DELETE FROM users WHERE user_id = ?"
       
-      # 3. Execute
-      dbExecute(conn, query)
+      # 3. Execute with params
+      dbExecute(conn, query, params = list(raw_target_id))
       
       showNotification("User deleted.", type = "warning")
       shinyjs::click("user_refresh_trigger")
@@ -1203,7 +1245,7 @@ server <- function(input, output, session) {
   output$table <- renderDT({
     # Use the filtered data reactive created above
     df <- filtered_data()
-    
+    print(df)
     # Select columns for display
     df_display <- df %>% 
       select(plan_id, plan_number, plan_name, Primary_Street, department, date_on_plan)
@@ -1218,6 +1260,97 @@ server <- function(input, output, session) {
               escape = FALSE, 
               selection = "single", 
               rownames = FALSE)
+  })
+  
+  
+  # --- Inside the server function ---
+  
+  # 1. Function to fetch current streets
+  get_streets <- function() {
+    conn <- get_db_conn()
+    on.exit(dbDisconnect(conn))
+    dbGetQuery(conn, "SELECT street_name, created_at FROM streets WHERE is_active = 1 ORDER BY street_name ASC")
+  }
+  
+  # 2. Render the table in Settings
+  output$master_street_table <- renderDT({
+    # We use a reactive trigger or just poll here
+    datatable(get_streets(), options = list(pageLength = 10))
+  })
+  
+  
+  
+  observeEvent(input$process_streets, {
+    req(input$street_bulk_file)
+    
+    
+    
+    # 1. AUTH RECOVERY: If user_info is null, fetch it manually using user_id
+    # We know user_id exists because of your log [1]
+    user_id_to_check <- isolate(res_auth$user_id)
+    
+    conn <- get_db_conn()
+    on.exit(dbDisconnect(conn))
+    
+    # Manually fetch tenant_id since res_auth$user_info is empty
+    user_query <- "SELECT tenant_id FROM users WHERE email = ? OR user_id = ?"
+    user_check <- dbGetQuery(conn, user_query, params = list(user_id_to_check, user_id_to_check))
+    
+    if (nrow(user_check) == 0) {
+      showNotification("Critical Error: Could not find Tenant ID for this user session.", type = "error")
+      print(paste("DEBUG ERROR: No tenant found for user ID:", user_id_to_check))
+      return()
+    }
+    
+    tid <- user_check$tenant_id[1]
+    
+    
+    # 2. READ FILE
+    ext <- tools::file_ext(input$street_bulk_file$name)
+    raw_df <- if(ext == "csv") {
+      read.csv(input$street_bulk_file$datapath, stringsAsFactors = FALSE)
+    } else {
+      readxl::read_excel(input$street_bulk_file$datapath)
+    }
+    
+    # 3. PREPARE DATA (Schema: street_id, tenant_id, street_name, is_active)
+    # Ensure we use the column with the street names
+    # If the CSV has no header, it might name the column 'V1' or 'street_name'
+    col_name <- if("street_name" %in% names(raw_df)) "street_name" else names(raw_df)[1]
+    
+    prepared_df <- raw_df %>%
+      dplyr::select(street_name = !!sym(col_name)) %>%
+      dplyr::filter(!is.na(street_name) & street_name != "") %>%
+      dplyr::distinct() %>%
+      dplyr::mutate(
+        street_id = sapply(1:n(), function(x) uuid::UUIDgenerate()),
+        tenant_id = tid,
+        is_active = 1
+      )
+    
+   
+    
+    # 4. FINAL SAVE
+    tryCatch({
+      # Check if any of these already exist for THIS tenant
+      existing <- dbGetQuery(conn, "SELECT street_name FROM streets WHERE tenant_id = ?", params = list(tid))$street_name
+      
+      final_to_insert <- prepared_df %>% dplyr::filter(!(street_name %in% existing))
+      
+      if(nrow(final_to_insert) > 0) {
+        dbAppendTable(conn, "streets", final_to_insert)
+        showNotification(paste("Success! Added", nrow(final_to_insert), "new streets."), type = "message")
+      } else {
+        showNotification("All streets in file already exist in your database.", type = "warning")
+      }
+      
+      # Refresh the UI table
+      output$master_street_table <- renderDT({ datatable(get_streets()) })
+      
+    }, error = function(e) {
+      print(paste("DB INSERT ERROR:", e$message))
+      showNotification(paste("Database Error:", e$message), type = "error")
+    })
   })
   
   # =========================================================================
@@ -1240,33 +1373,29 @@ server <- function(input, output, session) {
     
     # 2. Fetch Plan Details (Explicit Columns)
     # FIX: We select ONLY the columns we need to display, avoiding 'created_at' (Timestamp)
-    plan_sql <- sprintf(
-      "SELECT plan_number, plan_name, plan_type, department, date_on_plan, 
-              cabinet_number, drawer_number, plan_in_drawer, notes 
-       FROM plans WHERE plan_id = %s AND tenant_id = '%s'", 
-      dbEscapeStrings(conn, as.character(pk_id)), 
-      dbEscapeStrings(conn, tenant_id)
-    )
-    plan <- dbGetQuery(conn, plan_sql)
+    plan_sql <- "SELECT plan_number, plan_name, plan_type, department, date_on_plan, 
+                    cabinet_number, drawer_number, plan_in_drawer, notes 
+             FROM plans WHERE plan_id = ? AND tenant_id = ?"
+    
+    # Use params instead of dbEscapeStrings
+    plan <- dbGetQuery(conn, plan_sql, params = list(pk_id, tenant_id))
     
     # 3. Fetch Associated Streets (Explicit Columns)
-    street_sql <- sprintf(
-      "SELECT s.street_name, ps.focus 
-       FROM plan_streets ps 
-       JOIN streets s ON ps.street_id = s.street_id 
-       WHERE ps.plan_id = %s", 
-      dbEscapeStrings(conn, as.character(pk_id))
-    )
-    streets <- dbGetQuery(conn, street_sql)
+    street_sql <- "SELECT s.street_name, ps.focus 
+               FROM plan_streets ps 
+               JOIN streets s ON ps.street_id = s.street_id 
+               WHERE ps.plan_id = ?"
+    
+    # Execute with params instead of dbEscapeStrings and sprintf
+    streets <- dbGetQuery(conn, street_sql, params = list(pk_id))
     
     # 4. Fetch Documents (Explicit Columns)
     # FIX: We select ONLY needed columns, avoiding 'uploaded_at' (Timestamp)
-    doc_sql <- sprintf(
-      "SELECT object_key, display_name, category 
-       FROM plan_documents WHERE plan_id = %s", 
-      dbEscapeStrings(conn, as.character(pk_id))
-    )
-    docs <- dbGetQuery(conn, doc_sql)
+    doc_sql <- "SELECT object_key, display_name, category 
+            FROM plan_documents WHERE plan_id = ?"
+    
+    # Execute using params instead of dbEscapeStrings
+    docs <- dbGetQuery(conn, doc_sql, params = list(pk_id))
     
     # 5. Generate HTML List of Links
     doc_html <- tags$em("No documents attached.")
@@ -1333,107 +1462,6 @@ server <- function(input, output, session) {
       footer = modalButton("Close")
     ))
   })
-  # observeEvent(input$table_rows_selected, {
-  #   selected_idx <- input$table_rows_selected
-  #   req(selected_idx)
-  #   
-  #   df <- filtered_data()
-  #   selected_row <- df[selected_idx, ]
-  #   pk_id <- selected_row$plan_id
-  #   
-  #   # --- 1. GENERATE IMAGE URL ---
-  #   base_url <- "http://192.168.1.27/dpwplans/"
-  #   sub_folder <- "Scanned Plans and Documents/"
-  #   
-  #   clean_path <- function(x) {
-  #     if (is.na(x) || x == "") return("#")
-  #     x <- gsub("\\\\", "/", x)
-  #     parts <- unlist(strsplit(x, "/"))
-  #     cleaned_parts <- sapply(parts, function(p) {
-  #       raw <- utils::URLdecode(p)
-  #       utils::URLencode(raw, reserved = TRUE)
-  #     })
-  #     return(paste(cleaned_parts, collapse = "/"))
-  #   }
-  #   
-  #   full_img_url <- paste0(base_url, sub_folder, clean_path(selected_row$plan_image_url))
-  #   
-  #   # --- 2. FETCH STREETS ---
-  #   conn <- get_db_conn()
-  #   streets <- dbGetQuery(conn, paste0("SELECT * FROM dpw.street_focus WHERE plan_id = ", pk_id))
-  #   dbDisconnect(conn)
-  #   
-  #   street_html <- if(nrow(streets) > 0) {
-  #     paste(apply(streets, 1, function(x) paste0("<b>", x['street_name'], "</b> (", x['street_focus'], ")")), collapse = "<br>")
-  #   } else {
-  #     "<em>No streets associated</em>"
-  #   }
-  #   
-  #   # --- 3. DETERMINE PERMISSIONS (NEW SECURITY LOGIC) ---
-  #   user_role <- tolower(as.character(res_auth$role))
-  #   
-  #   # Default Footer: Only "Close" button
-  #   modal_footer <- tagList(modalButton("Close"))
-  #   
-  #   # Admin/Data Entry Footer: "Close" + "Edit" button
-  #   if (user_role %in% c("admin", "manager", "data entry")) {
-  #     modal_footer <- tagList(
-  #       modalButton("Close"),
-  #       actionButton("trigger_edit_from_view", "Edit Record", icon = icon("pencil"), class = "btn-warning", 
-  #                    onclick = sprintf("Shiny.setInputValue('edit_trigger', 'edit_%s', {priority: 'event'})", pk_id))
-  #     )
-  #   }
-  #   
-  #   # --- 4. SHOW MODAL ---
-  #   showModal(modalDialog(
-  #     # UPDATED TITLE WITH 'X' BUTTON
-  #     title = tagList(
-  #       paste("Plan Details:", selected_row$plan_number),
-  #       tags$button(
-  #         type = "button",
-  #         class = "close",
-  #         "data-dismiss" = "modal", 
-  #         "aria-label" = "Close",
-  #         tags$span("aria-hidden" = "true", HTML("&times;"))
-  #       )
-  #     ),
-  #     size = "l",
-  #     fluidRow(
-  #       column(6, 
-  #              h4("Basic Info"),
-  #              p(strong("Plan Name:"), selected_row$plan_name),
-  #              p(strong("Plan Type:"), selected_row$plan_type),
-  #              p(strong("Department:"), selected_row$department),
-  #              p(strong("Date:"), selected_row$date_on_plan),
-  #              
-  #              br(),
-  #              tags$a(href = full_img_url, target = "_blank", class = "btn btn-info", icon("eye"), " View Plan Image"),
-  #              br(), br(),
-  #              hr(),
-  #              
-  #              h4("Storage"),
-  #              p(strong("Cabinet:"), selected_row$cabinet_number),
-  #              p(strong("Drawer:"), selected_row$drawer_number),
-  #              p(strong("Plan #:"), selected_row$plan_in_drawer),
-  #              p(strong("Scale:"), selected_row$scale)
-  #       ),
-  #       column(6,
-  #              h4("Professional Info"),
-  #              p(strong("Consultant:"), selected_row$consulting_firm),
-  #              p(strong("Engineer:"), selected_row$engineer_name),
-  #              p(strong("Surveyor:"), selected_row$surveyor_name),
-  #              hr(),
-  #              h4("Content & Notes"),
-  #              p(strong("Content:"), selected_row$content_of_plan),
-  #              p(strong("Notes:"), selected_row$notes),
-  #              hr(),
-  #              h4("Streets"),
-  #              HTML(street_html)
-  #       )
-  #     ),
-  #     footer = modal_footer # <--- THIS IS THE KEY CHANGE
-  #   ))
-  # })
   
   # =========================================================================
   # --- EDIT PLAN LOGIC (TRIGGER) ---
@@ -1625,34 +1653,43 @@ server <- function(input, output, session) {
     conn <- get_db_conn()
     tryCatch({
       # 1. Update Main Table
-      query_main <- sprintf(
-        "UPDATE dpw.plan_data SET plan_number='%s', plan_name='%s', plan_type='%s', department='%s', date_on_plan='%s', cabinet_number='%s', drawer_number='%s', plan_in_drawer='%s', num_of_pages=%d, num_of_sheets=%d, scale='%s', consulting_firm='%s', engineer_name='%s', engineer_stamp='%s', surveyor_name='%s', surveyor_stamp='%s', content_of_plan='%s', notes='%s', plan_image_url='%s', town_bid='%s' WHERE plan_id=%s",
-        dbEscapeStrings(conn, input$edit_plan_number),
-        dbEscapeStrings(conn, input$edit_plan_name),
-        dbEscapeStrings(conn, input$edit_plan_type),
-        dbEscapeStrings(conn, input$edit_department),
+      query_main <- "UPDATE dpw.plan_data SET 
+                 plan_number=?, plan_name=?, plan_type=?, department=?, 
+                 date_on_plan=?, cabinet_number=?, drawer_number=?, plan_in_drawer=?, 
+                 num_of_pages=?, num_of_sheets=?, scale=?, consulting_firm=?, 
+                 engineer_name=?, engineer_stamp=?, surveyor_name=?, surveyor_stamp=?, 
+                 content_of_plan=?, notes=?, plan_image_url=?, town_bid=? 
+               WHERE plan_id=?"
+      
+      dbExecute(conn, query_main, params = list(
+        input$edit_plan_number,
+        input$edit_plan_name,
+        input$edit_plan_type,
+        input$edit_department,
         as.character(input$edit_date_on_plan),
-        dbEscapeStrings(conn, input$edit_cabinet_number),
-        dbEscapeStrings(conn, input$edit_drawer_number),
-        dbEscapeStrings(conn, input$edit_plan_in_drawer),
+        input$edit_cabinet_number,
+        input$edit_drawer_number,
+        input$edit_plan_in_drawer,
         as.integer(input$edit_num_pages),
         as.integer(input$edit_num_sheets),
-        dbEscapeStrings(conn, input$edit_scale),
-        dbEscapeStrings(conn, input$edit_consulting_firm_id),
-        dbEscapeStrings(conn, input$edit_engineer_name),
-        dbEscapeStrings(conn, input$edit_engineer_stamp),
-        dbEscapeStrings(conn, input$edit_surveyor_name),
-        dbEscapeStrings(conn, input$edit_surveyor_stamp),
-        dbEscapeStrings(conn, input$edit_content_of_plan),
-        dbEscapeStrings(conn, input$edit_notes),
-        dbEscapeStrings(conn, gsub("\\\\", "/", input$edit_plan_image_url)),
-        dbEscapeStrings(conn, input$edit_town_bid),
-        dbEscapeStrings(conn, input$edit_unique_id)
-      )
-      dbExecute(conn, query_main)
+        input$edit_scale,
+        input$edit_consulting_firm_id,
+        input$edit_engineer_name,
+        input$edit_engineer_stamp,
+        input$edit_surveyor_name,
+        input$edit_surveyor_stamp,
+        input$edit_content_of_plan,
+        input$edit_notes,
+        gsub("\\\\", "/", input$edit_plan_image_url), # Keep your gsub, just drop dbEscapeStrings
+        input$edit_town_bid,
+        input$edit_unique_id
+      ))
       
       # 2. Update Streets (Delete old, Insert new)
-      dbExecute(conn, paste0("DELETE FROM dpw.street_focus WHERE plan_id = ", input$edit_unique_id))
+      query <- "DELETE FROM dpw.street_focus WHERE plan_id = ?"
+      
+      # Execute with params instead of paste0
+      dbExecute(conn, query, params = list(input$edit_unique_id))
       
       current_rows <- values$edit_dynamic_rows
       if (length(current_rows) > 0) {
@@ -1661,9 +1698,10 @@ server <- function(input, output, session) {
           s_focus <- input[[paste0("edit_streetfocus_", rid)]]
           
           if (!is.null(s_name) && s_name != "") {
-            q_s <- sprintf("INSERT INTO plan_streets (plan_id, street_name, street_focus) VALUES (%s, '%s', '%s')",
-                           input$edit_unique_id, dbEscapeStrings(conn, s_name), dbEscapeStrings(conn, s_focus))
-            dbExecute(conn, q_s)
+            q_s <- "INSERT INTO plan_streets (plan_id, street_name, street_focus) VALUES (?, ?, ?)"
+            
+            
+            dbExecute(conn, q_s, params = list(input$edit_unique_id, s_name, s_focus))
           }
         }
       }
@@ -1774,9 +1812,10 @@ server <- function(input, output, session) {
     conn <- get_db_conn()
     tryCatch({
       # 1. Fetch the CURRENT hash from DB to verify identity
-      safe_user <- dbEscapeStrings(conn, res_auth$user_id)
-      query <- sprintf("SELECT password_hash FROM users WHERE user_id = '%s'", safe_user)
-      user_data <- dbGetQuery(conn, query)
+      query <- "SELECT password_hash FROM users WHERE user_id = ?"
+      
+      
+      user_data <- dbGetQuery(conn, query, params = list(res_auth$user_id))
       
       if (nrow(user_data) == 0) {
         showNotification("User not found.", type = "error")
@@ -1795,11 +1834,12 @@ server <- function(input, output, session) {
       
       # 3. Hash the NEW password and Update DB
       new_hash <- scrypt::hashPassword(input$cp_new_pass)
-      safe_hash <- dbEscapeStrings(conn, new_hash)
+      # Note: You no longer need the safe_hash <- dbEscapeStrings(...) line
       
-      update_query <- sprintf("UPDATE users SET password_hash = '%s' WHERE user_id = '%s'", 
-                              safe_hash, safe_user)
-      dbExecute(conn, update_query)
+      update_query <- "UPDATE users SET password_hash = ? WHERE user_id = ?"
+      
+
+      dbExecute(conn, update_query, params = list(new_hash, res_auth$user_id))
       
       removeModal()
       showNotification("Password updated successfully! Logging you out...", type = "message")

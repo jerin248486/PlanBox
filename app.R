@@ -80,8 +80,6 @@ Sys.setenv(
   "AWS_DEFAULT_REGION" = config::get("s3")$region,
   "S3_BUCKET_NAME" = config::get("s3")$bucket_name
 )
-#S3_BUCKET_NAME <- config::get("s3")$bucket_name
-
 
 # --- S3 HELPER FUNCTIONS ---
 
@@ -89,21 +87,16 @@ upload_to_s3 <- function(file_path, file_name, tenant_id, plan_id) {
   # Creates a folder structure: tenant_id/plan_id/filename.pdf
   s3_key <- paste0(tenant_id, "/", plan_id, "/", file_name)
   
+  # FIX: Fetch the bucket name directly from the environment variables you set earlier
+  bucket_name <- Sys.getenv("S3_BUCKET_NAME")
+  
   tryCatch({
-    aws.s3::put_object(file = file_path, object = s3_key, bucket = S3_BUCKET_NAME)
-    return(list(success = TRUE, key = s3_key, bucket = S3_BUCKET_NAME))
+    aws.s3::put_object(file = file_path, object = s3_key, bucket = bucket_name)
+    return(list(success = TRUE, key = s3_key, bucket = bucket_name))
   }, error = function(e) {
-    return(list(success = FALSE, error = e$message))
+    return(list(success = FALSE, error = e$message)) 
   })
 }
-
-# get_s3_link <- function(object_key) {
-#   # Generates a temporary, secure link (valid for 1 hour)
-#   tryCatch({
-#     aws.s3::get_presigned_url(object = object_key, bucket = S3_BUCKET_NAME, expiration = 3600)
-#   }, error = function(e) return("#"))
-# }
-
 
 
 # --- HELPER: Download and Serve S3 File (Robust Fix) ---
@@ -120,68 +113,39 @@ get_s3_link <- function(obj_key) {
   }
   
   # 2. Generate a safe local filename
-  # We use a hash of the key to avoid issues with slashes or duplicate names
-  ext <- tools::file_ext(obj_key)
-  safe_name <- paste0(digest::digest(obj_key), ".", ext)
+  # Replaces slashes and special characters with underscores 
+  # (This removes the need for the missing 'digest' package)
+  safe_name <- gsub("[^A-Za-z0-9.]", "_", obj_key)
   local_path <- file.path(cache_dir, safe_name)
   
   # 3. Download if not already cached
   if (!file.exists(local_path)) {
     print(paste("DEBUG S3: Downloading to cache:", obj_key))
     
-    tryCatch({
+    # We must track success to avoid serving broken links
+    success <- tryCatch({
       aws.s3::save_object(
         object = obj_key,
         bucket = bucket,
         file = local_path,
-        # Credentials are picked up automatically from Sys.getenv
         region = Sys.getenv("AWS_DEFAULT_REGION")
       )
+      TRUE # Download succeeded
     }, error = function(e) {
       print(paste("DEBUG S3: Download Failed -", e$message))
-      return("#")
+      FALSE # Download failed
     })
+    
+    # If the AWS download failed, return "#" so it doesn't serve a broken file path
+    if (!success) {
+      return("#")
+    }
   }
   
   # 4. Return the Web Path
   # Since 'www' is the root, we return 's3_cache/filename.ext'
   return(paste0("s3_cache/", safe_name))
 }
-
-
-
-# --- HELPER: Generate Secure S3 Link (Debug Version) ---
-get_s3_link <- function(obj_key) {
-  # # 1. Check if key exists
-  # if (is.null(obj_key) || is.na(obj_key) || obj_key == "") {
-  #   print("DEBUG S3: Error - Object Key is NULL or Empty in Database")
-  #   return("#")
-  # }
-  # 
-  # # 2. Check if Bucket Name is loaded
-  # if (!exists("S3_BUCKET_NAME") || is.null(S3_BUCKET_NAME)) {
-  #   print("DEBUG S3: Error - S3_BUCKET_NAME variable is missing!")
-  #   return("#")
-  # }
-  # 
-  # print(paste("DEBUG S3: Generating link for key:", obj_key))
-
-  # 3. Generate URL
-  url <- tryCatch({
-    aws.s3::get_object_url(
-      object = obj_key,
-      bucket = S3_BUCKET_NAME,
-      expiration = 3600, # Link valid for 1 hour
-      https = TRUE
-    )
-  }, error = function(e) {
-    print(paste("DEBUG S3: AWS Error -", e$message))
-    return("#")
-  })
-
-  return(url)
-}
-
 
 
 # Define the authentication function with DEBUG prints
@@ -369,13 +333,12 @@ sidebarMenu(
               column(2, dateInput("date_on_plan", "Date on Plan", value = NULL))
             ),
             fluidRow(
-          
-              column(4, selectInput("doc_category", "Document Category", 
-                                    choices = c("Plan Image", "Supporting Doc", "Permit"), 
-                                    selected = "Plan Image")),
-              column(8, fileInput("plan_files", "Upload Documents", 
-                                  multiple = TRUE, 
-                                  accept = c(".pdf", ".jpg", ".png", ".tif")))
+              column(12,
+                     tags$h4("Plan Documents"),
+                     actionButton("add_doc_row", "Add Documents", icon = icon("plus"), class = "btn-success"),
+                     tags$br(), tags$br(),
+                     tags$div(id = "document_upload_container") # This empty div will hold our dynamic rows
+              )
             )
           )
         ),
@@ -707,25 +670,58 @@ server <- function(input, output, session) {
       values$dynamic_rows <- values$dynamic_rows[!values$dynamic_rows %in% row_id]
     })
   })
-  # observeEvent(input$add_row, {
-  #   row_id <- paste0("row", row_counter() + 1)
-  #   conn <- get_db_conn(); s_list <- dbReadTable(conn, "streets")$street_name; dbDisconnect(conn)
-  #   
-  #   insertUI(selector = "#dynamicRows", ui = fluidRow(id = row_id,
-  #                                                     column(5, selectizeInput(paste0("streetname_", row_id), "Street Name:", choices = s_list)),
-  #                                                     column(5, selectizeInput(paste0("streetfocus_", row_id), "Focus:", choices = c("", "Primary", "Secondary", "Tertiary"))),
-  #                                                     column(2, actionButton(paste0("delete_", row_id), "", icon = icon("trash"), class = "btn-danger", style = "margin-top: 25px;"))
-  #   ))
-  #   row_counter(row_counter() + 1)
-  #   values$dynamic_rows <- c(values$dynamic_rows, row_id)
-  #   
-  #   observeEvent(input[[paste0("delete_", row_id)]], {
-  #     removeUI(selector = paste0("#", row_id))
-  #     values$dynamic_rows <- values$dynamic_rows[!values$dynamic_rows %in% row_id]
-  #   })
-  # })
- 
   
+ 
+  # Keep track of how many document rows have been generated
+  doc_row_counter <- reactiveVal(0)
+  
+  observeEvent(input$add_doc_row, {
+    current_count <- doc_row_counter() + 1
+    doc_row_counter(current_count) # Update the counter
+    
+    row_id <- paste0("doc_row_", current_count)
+    
+    # insertUI(
+    #   selector = "#document_upload_container",
+    #   where = "beforeEnd",
+    #   ui = tags$div(
+    #     id = row_id,
+    #     class = "row",
+    #     style = "border: 1px solid #ccc; padding: 10px; margin-bottom: 10px; border-radius: 5px; background-color: #f9f9f9;",
+    #     column(4, selectInput(paste0("doc_cat_", current_count), "Category", 
+    #                           choices = c("Plan Image", "Supporting Doc", "Permit"))),
+    #     column(6, fileInput(paste0("doc_file_", current_count), "Upload File", 
+    #                         accept = c(".pdf", ".jpg", ".png", ".tif"))),
+    #     column(2, actionButton(paste0("remove_", row_id), "Remove", icon = icon("trash"), 
+    #                            class = "btn-danger", style = "margin-top: 25px;"))
+    #   )
+    # )
+    
+    insertUI(
+      selector = "#document_upload_container",
+      where = "beforeEnd",
+      ui = tags$div(
+        id = row_id,
+        # Removed class="row" from this outer div
+        style = "border: 1px solid #ccc; padding: 20px; margin-bottom: 10px; border-radius: 5px; background-color: #f9f9f9;",
+        
+        # Placed the columns safely inside a fluidRow() instead
+        fluidRow(
+          column(4, selectInput(paste0("doc_cat_", current_count), "Category", 
+                                choices = c("Plan Image", "Supporting Doc", "Permit"))),
+          column(6, fileInput(paste0("doc_file_", current_count), "Upload File", 
+                              accept = c(".pdf", ".jpg", ".png", ".tif"))),
+          column(2, actionButton(paste0("remove_", row_id), "Remove", icon = icon("trash"), 
+                                 class = "btn-danger", style = "margin-top: 25px;"))
+        )
+      )
+    )
+    
+    # Add an observer to instantly remove this specific row if they click the trash can
+    observeEvent(input[[paste0("remove_", row_id)]], {
+      removeUI(selector = paste0("#", row_id))
+    }, ignoreInit = TRUE, once = TRUE)
+  })  
   
   # --- SAVE PLAN DATA ---
   observeEvent(input$save, {
@@ -761,42 +757,109 @@ server <- function(input, output, session) {
         input$surveyor_stamp, input$content_of_plan, input$notes, as.character(input$date_on_plan)
       ))
       
+      
+      
+      
+      
       # 3. Get the new Plan ID
       new_plan_id <- dbGetQuery(conn, "SELECT LAST_INSERT_ID() as id")$id[1]
       
-      # 4. Handle S3 File Uploads
-      if (!is.null(input$plan_files)) {
-        # Loop through each uploaded file
-        for (i in 1:nrow(input$plan_files)) {
-          file_row <- input$plan_files[i, ]
+      ## STREET ASSOCIATION WITH PLANS 
+      
+      # 5. Handle Associated Streets from Dynamic Rows
+      if (length(values$dynamic_rows) > 0) {
+        for (row_id in values$dynamic_rows) {
+          # Get values from the UI inputs we created dynamically
+          st_name  <- input[[paste0("streetname_", row_id)]]
+          st_focus <- input[[paste0("streetfocus_", row_id)]]
           
-          # Upload to AWS
-          res <- upload_to_s3(file_row$datapath, file_row$name, current_tenant_id(), new_plan_id)
-          
-          if (res$success) {
-            # Record in Database
-            q_doc <- "INSERT INTO plan_documents (document_id, tenant_id, plan_id, category, display_name, original_file_name, storage_provider, bucket, object_key, mime_type, size_bytes, uploaded_by) VALUES (UUID(), ?, ?, ?, ?, ?, 's3', ?, ?, ?, ?, ?)"
+          # Only proceed if a street name was actually selected/typed
+          if (!is.null(st_name) && st_name != "") {
             
-            dbExecute(conn, q_doc, params = list(
-              current_tenant_id(), new_plan_id, input$doc_category, file_row$name, 
-              file_row$name, res$bucket, res$key, file_row$type, 
-              as.numeric(file_row$size), res_auth$user_id
-            ))
+            # A. Check if this street already exists for this tenant
+            res <- dbGetQuery(conn, "SELECT street_id FROM streets WHERE street_name = ? AND tenant_id = ?", 
+                              params = list(st_name, current_tenant_id()))
             
-         
+            # C. If it exists, use the existing ID
+            st_id_to_use <- res$street_id[1]
+            
+            
+            # D. Create the association in the junction table
+            dbExecute(conn, 
+                      "INSERT INTO plan_streets (plan_street_id, tenant_id, plan_id, street_id, focus) VALUES (UUID(), ?, ?, ?, ?)",
+                      params = list(current_tenant_id(), new_plan_id, st_id_to_use, st_focus))
           }
         }
       }
       
-      # res <- dbGetQuery(conn, "SELECT street_id FROM streets WHERE street_name = ?", params =list(st_name))
-      # if(nrow(res) == 0) {
-      #   new_id <- uuid::UUIDgenerate()
-      #   dbExecute(conn, "INSERT INTO streets (street_id, tenant_id, street_name) VALUES (?, ?, ?)", 
-      #             params=list(new_id, current_tenant_id(), st_name))
-      #   st_id_to_use <- new_id
-      # } else {
-      #   st_id_to_use <- res$street_id[1]
+      # 4. Handle S3 File Uploads
+      
+      # Loop through the dynamic document rows
+      # doc_row_counter() tells us the maximum number of rows generated
+      if (doc_row_counter() > 0) {
+        for (i in 1:doc_row_counter()) {
+          
+          # Construct the exact input IDs for this specific row
+          file_input_name <- paste0("doc_file_", i)
+          cat_input_name <- paste0("doc_cat_", i)
+          
+          # Check if the file input actually contains a file 
+          # (It might be NULL if they deleted the row or left it blank)
+          if (!is.null(input[[file_input_name]])) {
+            
+            file_row <- input[[file_input_name]]
+            doc_category <- input[[cat_input_name]]
+            
+            # Upload to AWS
+            res <- upload_to_s3(file_row$datapath, file_row$name, current_tenant_id(), new_plan_id)
+            
+            if (res$success) {
+              # Record in Database
+              q_doc <- "INSERT INTO plan_documents (document_id, tenant_id, plan_id, category, display_name, original_file_name, storage_provider, bucket, object_key, mime_type, size_bytes, uploaded_by) VALUES (UUID(), ?, ?, ?, ?, ?, 's3', ?, ?, ?, ?, ?)"
+              
+              dbExecute(conn, q_doc, params = list(
+                current_tenant_id(), new_plan_id, doc_category, file_row$name, 
+                file_row$name, res$bucket, res$key, file_row$type, 
+                as.numeric(file_row$size), isolate(res_auth$user_id)
+              ))
+            } else {
+              showNotification(paste("Failed to upload:", file_row$name, "-", res$error), type = "error")
+            }
+          }
+        }
+      }
+      
+      # Optional: Reset the counter and clear the container for the next plan
+      doc_row_counter(0)
+      removeUI(selector = "#document_upload_container > div", multiple = TRUE)
+      # if (!is.null(input$plan_files)) {
+      #   # Loop through each uploaded file
+      #   for (i in 1:nrow(input$plan_files)) {
+      #     file_row <- input$plan_files[i, ]
+      #     
+      #     # Upload to AWS
+      #     res <- upload_to_s3(file_row$datapath, file_row$name, current_tenant_id(), new_plan_id)
+      #     
+      #     if (res$success) {
+      #       # Record in Database
+      #       q_doc <- "INSERT INTO plan_documents (document_id, tenant_id, plan_id, category, display_name, original_file_name, storage_provider, bucket, object_key, mime_type, size_bytes, uploaded_by) VALUES (UUID(), ?, ?, ?, ?, ?, 's3', ?, ?, ?, ?, ?)"
+      #       
+      #       # Using isolate() for user_id to prevent any reactive 'silent stops'
+      #       current_user <- isolate(res_auth$user_id) 
+      #       
+      #       dbExecute(conn, q_doc, params = list(
+      #         current_tenant_id(), new_plan_id, input$doc_category, file_row$name, 
+      #         file_row$name, res$bucket, res$key, file_row$type, 
+      #         as.numeric(file_row$size), current_user
+      #       ))
+      #     } else {
+      #       # CRITICAL: Tell the user if the AWS upload failed
+      #       showNotification(paste("Failed to upload document:", file_row$name, "-", res$error), type = "error")
+      #       print(paste("S3 Error:", res$error))
+      #     }
+      #   }
       # }
+      
       
       dbCommit(conn) # Commit Transaction
       showNotification("Plan Saved Successfully!", type="message")
@@ -827,7 +890,7 @@ server <- function(input, output, session) {
     data_refresh_trigger()
     
     req(current_tenant_id())
-    print("Debugging filtered_data. Success!")
+    
     conn <- get_db_conn()
     on.exit(dbDisconnect(conn))
     
@@ -1245,7 +1308,6 @@ server <- function(input, output, session) {
   output$table <- renderDT({
     # Use the filtered data reactive created above
     df <- filtered_data()
-    print(df)
     # Select columns for display
     df_display <- df %>% 
       select(plan_id, plan_number, plan_name, Primary_Street, department, date_on_plan)
@@ -1269,7 +1331,7 @@ server <- function(input, output, session) {
   get_streets <- function() {
     conn <- get_db_conn()
     on.exit(dbDisconnect(conn))
-    dbGetQuery(conn, "SELECT street_name, created_at FROM streets WHERE is_active = 1 ORDER BY street_name ASC")
+    dbGetQuery(conn, "SELECT street_name, created_at FROM streets WHERE is_active = 1 AND tenant_id = ? ORDER BY street_name ASC", params = list(current_tenant_id()))
   }
   
   # 2. Render the table in Settings

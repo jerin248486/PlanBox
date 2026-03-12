@@ -112,6 +112,29 @@ get_s3_link <- function(obj_key) {
     dir.create(cache_dir, recursive = TRUE)
   }
   
+  # ==========================================
+  # NEW: AUTO-CLEANUP (Garbage Collection)
+  # Delete files older than 15 minutes to save EC2 space
+  # ==========================================
+  cached_files <- list.files(cache_dir, full.names = TRUE)
+  if (length(cached_files) > 0) {
+    # Get the time each file was last modified/created
+    file_info <- file.info(cached_files)
+    
+    # Calculate how many minutes old each file is
+    age_in_mins <- difftime(Sys.time(), file_info$mtime, units = "mins")
+    
+    # Find files older than 15 minutes
+    old_files <- cached_files[age_in_mins > 1]
+    
+    # Delete them
+    if (length(old_files) > 0) {
+      file.remove(old_files)
+      print(paste("DEBUG S3: Cleaned up", length(old_files), "old files from cache."))
+    }
+  }
+  # ==========================================
+  
   # 2. Generate a safe local filename
   # Replaces slashes and special characters with underscores 
   # (This removes the need for the missing 'digest' package)

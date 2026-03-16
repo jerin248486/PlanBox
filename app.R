@@ -1177,7 +1177,7 @@ server <- function(input, output, session) {
     user_data <- tryCatch({
       # Note: RMariaDB actually handles timestamps perfectly, but explicitly 
       # selecting columns is still best practice!
-      query <- "SELECT user_id, email, role FROM users WHERE user_id = ?"
+      query <- "SELECT user_id, email, full_name, role, is_active FROM users WHERE user_id = ?"
       
       # Use params instead of dbEscapeStrings
       dbGetQuery(conn, query, params = list(selected_user_id))
@@ -1196,14 +1196,15 @@ server <- function(input, output, session) {
     
     # 4. Show Modal
     showModal(modalDialog(
-      title = paste("Edit User:", user_data$email),
+      title = paste("Edit User:", user_data$full_name),
       
       # Hidden input to track who we are editing (Using the ID from DB)
       div(style = "display:none;", 
           textInput("edit_target_user_id", "", value = user_data$user_id)),
+      # View-only Name and email
+      shinyjs::disabled(textInput("edit_name_input", "Name", value = user_data$full_name)),
       
-      # FIX: Mapped to 'email' because 'name' likely doesn't exist in your table
-      textInput("edit_user_name_input", "Email / Username", value = user_data$email),
+      shinyjs::disabled(textInput("edit_email", "Email", value = user_data$email)),
       
       # FIX: Mapped to 'role' because 'permissions' likely doesn't exist in your table
       selectInput("edit_user_perm_input", "Permissions", 
@@ -1245,12 +1246,15 @@ server <- function(input, output, session) {
       if (input$edit_user_pass_input != "") {
         # CASE A: Update Password + Info
         new_hash <- scrypt::hashPassword(input$edit_user_pass_input)
-        
-        query <- "UPDATE users SET `name` = ?, `permissions` = ?, `password` = ? WHERE `user` = ?"
+        # print(paste("User Name:", input$edit_user_name_input, 
+        #             "Role:", input$edit_user_perm_input, 
+        #             "Password:",new_hash, 
+        #             "User ID:",input$edit_target_user_id))
+        # query <- "UPDATE users SET `full_name` = ?, email` = ?,`permissions` = ?, `password` = ? WHERE `user_id` = ?"
+        query <- "UPDATE users SET `role` = ?, `password_hash` = ? WHERE `user_id` = ?"
         
         # 3. Execute with params
         dbExecute(conn, query, params = list(
-          input$edit_user_name_input, 
           input$edit_user_perm_input, 
           new_hash, 
           input$edit_target_user_id
@@ -1258,11 +1262,10 @@ server <- function(input, output, session) {
         
       } else {
         # CASE B: Update Info Only (Keep old password)
-        query <- "UPDATE users SET `name` = ?, `permissions` = ? WHERE `user` = ?"
+        query <- "UPDATE users SET `role` = ? WHERE `user_id` = ?"
         
         # 3. Execute with params
-        dbExecute(conn, query, params = list(
-          input$edit_user_name_input, 
+        dbExecute(conn, query, params = list( 
           input$edit_user_perm_input, 
           input$edit_target_user_id
         ))
@@ -1333,7 +1336,8 @@ server <- function(input, output, session) {
     df <- filtered_data()
     # Select columns for display
     df_display <- df %>% 
-      select(plan_id, plan_number, plan_name, Primary_Street, department, date_on_plan)
+      select(plan_id, plan_number, plan_name, Primary_Street, department, date_on_plan) %>%
+      arrange(plan_name)
     
     colnames(df_display) <- c("ID", "Plan #", "Plan Name", "Primary Street", "Department", "Date")
     
@@ -1458,8 +1462,11 @@ server <- function(input, output, session) {
     
     # 2. Fetch Plan Details (Explicit Columns)
     # FIX: We select ONLY the columns we need to display, avoiding 'created_at' (Timestamp)
-    plan_sql <- "SELECT plan_number, plan_name, plan_type, department, date_on_plan, 
-                    cabinet_number, drawer_number, plan_in_drawer, notes 
+    # plan_sql <- "SELECT plan_number, plan_name, plan_type, department, date_on_plan, 
+    #                 cabinet_number, drawer_number, plan_in_drawer, notes 
+    #          FROM plans WHERE plan_id = ? AND tenant_id = ?"
+    
+    plan_sql <- "SELECT *
              FROM plans WHERE plan_id = ? AND tenant_id = ?"
     
     # Use params instead of dbEscapeStrings
@@ -1502,50 +1509,144 @@ server <- function(input, output, session) {
     }
     
     # 6. Show the Modal
+    
     showModal(modalDialog(
-      # title = paste("Plan Details:", plan$plan_number),
-      # size = "l", 
       title = tags$div(
         style = "display: flex; justify-content: space-between; align-items: center; width: 100%;",
-        tags$span(paste("Plan Details:", plan$plan_name), style = "font-weight: bold;"),
-        # The close button
+        tags$span(paste("Plan Name:", plan$plan_name, " | Plan Number:", plan$plan_number), style = "font-weight: bold; font-size: 18px;"),
         tags$button(
           type = "button", 
           class = "close", 
           `data-dismiss` = "modal", 
           icon("times"),
-          style = "font-size: 24px; color: #FFFFFF; opacity: 0.7; margin-top: -5px;"
+          style = "font-size: 24px; color: #000000; opacity: 0.5; margin-top: -5px;"
         )
       ),
       size = "l",
       easyClose = TRUE,
       fade = TRUE,
+      
+      # Hidden input to store the current plan ID so the Edit button knows what to target
+      tags$div(style = "display:none;", textInput("current_view_plan_id", "", value = plan$unique_id)),
+      
       fluidRow(
+        # --- LEFT COLUMN ---
         column(6, 
-               h4("Basic Info"),
-               p(strong("Plan Name:"), plan$plan_name),
-               p(strong("Type:"), plan$plan_type),
-               p(strong("Department:"), plan$department),
-               p(strong("Date:"), plan$date_on_plan),
-               hr(),
-               h4("Attached Documents"),
-               doc_html 
+               # Basic Info Card
+               tags$div(style = "background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 15px; border-left: 4px solid #18BC9C;",
+                        h4(icon("info-circle"), " Basic Information", style = "margin-top: 0; color: #2C3E50; border-bottom: 1px solid #ddd; padding-bottom: 5px;"),
+                        p(strong("Type: "), plan$plan_type),
+                        p(strong("Department: "), plan$department),
+                        p(strong("Date: "), plan$date_on_plan)
+               ),
+               # Documents Card
+               tags$div(style = "background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 15px; border-left: 4px solid #3498db;",
+                        h4(icon("file-pdf"), " Attached Documents", style = "margin-top: 0; color: #2C3E50; border-bottom: 1px solid #ddd; padding-bottom: 5px;"),
+                        doc_html
+               ),
+               # Streets Card
+               tags$div(style = "background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 15px; border-left: 4px solid #e67e22;",
+                        h4(icon("road"), " Associated Streets", style = "margin-top: 0; color: #2C3E50; border-bottom: 1px solid #ddd; padding-bottom: 5px;"),
+                        if(nrow(streets) > 0) {
+                          HTML(paste(apply(streets, 1, function(x) paste0("<span style='display:inline-block; background:#e2e3e5; padding:3px 8px; border-radius:12px; margin:2px; font-size:13px;'><b>", x['street_name'], "</b> (", x['focus'], ")</span>")), collapse = " "))
+                        } else {
+                          tags$em("No streets recorded.", style = "color: #777;")
+                        }
+               )
         ),
+        
+        # --- RIGHT COLUMN ---
         column(6,
-               h4("Storage & Notes"),
-               p(strong("Location:"), paste("Cab:", plan$cabinet_number, "/ Drw:", plan$drawer_number)),
-               p(strong("Notes:"), plan$notes),
-               hr(),
-               h4("Associated Streets"),
-               if(nrow(streets) > 0) {
-                 HTML(paste(apply(streets, 1, function(x) paste0("<b>", x['street_name'], "</b> (", x['focus'], ")")), collapse = "<br>"))
-               } else {
-                 "No streets recorded."
-               }
+               # Storage Card
+               tags$div(style = "background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 15px; border-left: 4px solid #9b59b6;",
+                        h4(icon("archive"), " Storage Location", style = "margin-top: 0; color: #2C3E50; border-bottom: 1px solid #ddd; padding-bottom: 5px;"),
+                        p(strong("Cabinet #: "), plan$cabinet_number),
+                        p(strong("Drawer #: "), plan$drawer_number),
+                        p(strong("Plan # in Drawer: "), plan$plan_in_drawer)
+               ),
+               # Technical Details Card
+               tags$div(style = "background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 15px; border-left: 4px solid #e74c3c;",
+                        h4(icon("ruler-combined"), " Technical Details", style = "margin-top: 0; color: #2C3E50; border-bottom: 1px solid #ddd; padding-bottom: 5px;"),
+                        p(strong("Scale: "), plan$scale),
+                        p(strong("Pages: "), plan$num_of_pages, " | ", strong("Sheets: "), plan$num_of_sheets),
+                        p(strong("Town Bid: "), plan$town_bid),
+                        p(strong("Content: "), plan$content_of_plan)
+               ),
+               # Personnel & Notes Card
+               tags$div(style = "background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 15px; border-left: 4px solid #34495e;",
+                        h4(icon("hard-hat"), " Personnel & Notes", style = "margin-top: 0; color: #2C3E50; border-bottom: 1px solid #ddd; padding-bottom: 5px;"),
+                        p(strong("Consulting Firm: "), plan$consulting_firm),
+                        p(strong("Engineer: "), plan$engineer_name, tags$span(style="color:#777;", paste0("(Stamp: ", plan$engineer_stamp, ")"))),
+                        p(strong("Surveyor: "), plan$surveyor_name, tags$span(style="color:#777;", paste0("(Stamp: ", plan$surveyor_stamp, ")"))),
+                        tags$hr(style = "margin: 10px 0; border-top: 1px solid #ccc;"),
+                        p(strong("Notes: "), tags$br(), tags$span(style = "white-space: pre-wrap;", plan$notes))
+               )
         )
       ),
-      footer = modalButton("Close")
+      
+      # --- FOOTER WITH EDIT BUTTON ---
+      footer = tagList(
+        modalButton("Close"),
+        actionButton("edit_trigger", "Edit Plan", icon = icon("edit"), class = "btn-warning")
+      )
     ))
+    
+    # showModal(modalDialog(
+    #   # title = paste("Plan Details:", plan$plan_number),
+    #   # size = "l", 
+    #   title = tags$div(
+    #     style = "display: flex; justify-content: space-between; align-items: center; width: 100%;",
+    #     tags$span(paste("Plan Name: ", plan$plan_name, " | Plan Number:", plan$plan_number), style = "font-weight: bold;"),
+    #     # The close button
+    #     tags$button(
+    #       type = "button", 
+    #       class = "close", 
+    #       `data-dismiss` = "modal", 
+    #       icon("times"),
+    #       style = "font-size: 24px; color: #FFFFFF; opacity: 0.7; margin-top: -5px;"
+    #     )
+    #   ),
+    #   size = "l",
+    #   easyClose = TRUE,
+    #   fade = TRUE,
+    #   fluidRow(
+    #     column(6, 
+    #            h4("Basic Information"),
+    #            #p(strong("Plan Name:"), plan$plan_name),
+    #            p(strong("Type:"), plan$plan_type),
+    #            p(strong("Department:"), plan$department),
+    #            p(strong("Date:"), plan$date_on_plan),
+    #            h4("Attached Documents"),
+    #            doc_html,
+    #            h4("Associated Streets"),
+    #            if(nrow(streets) > 0) {
+    #              HTML(paste(apply(streets, 1, function(x) paste0("<b>", x['street_name'], "</b> (", x['focus'], ")")), collapse = "<br>"))
+    #            } else {
+    #              "No streets recorded."
+    #            }
+    #     ),
+    #     column(6,
+    #            h4("Details"),
+    #            p(strong("Cabinet #: "), plan$cabinet_number),
+    #            p(strong("Drawer #: "), plan$drawer_number),
+    #            p(strong("Plan # in Drawer: "), plan$plan_in_drawer),
+    #            p(strong("# of pages"), plan$num_of_pages),
+    #            p(strong("# of sheets"), plan$num_of_sheets),
+    #            p(strong("Scale"), plan$scale),
+    #            p(strong("Consulting Firm"), plan$consulting_firm),
+    #            p(strong("Town Bid"), plan$town_bid),
+    #            p(strong("Engineer Name"), plan$engineer_name),
+    #            p(strong("Engineer Stamp #"), plan$engineer_stamp),
+    #            p(strong("Surveyor Name"), plan$surveyor_name),
+    #            p(strong("Surveyor Stamp #"), plan$surveyor_stamp),
+    #            p(strong("Content of the Plan"), plan$content_of_plan),
+    #            p(strong("Notes:"), plan$notes),
+    #            hr(),
+    #            
+    #     )
+    #   ),
+    #   footer = modalButton("Close")
+    # ))
   })
   
   # =========================================================================
@@ -1568,15 +1669,17 @@ server <- function(input, output, session) {
     clicked_id <- sub("edit_", "", input$edit_trigger)
     
     conn <- get_db_conn()
-    safe_id <- dbEscapeStrings(conn, clicked_id)
+    # SAFETY NET: Guarantee the connection closes even if an error occurs below
+    on.exit(dbDisconnect(conn)) 
     
-    # Fetch existing data
-    plan_data <- dbGetQuery(conn, paste0("SELECT * FROM plans WHERE plan_id = ", safe_id))
-    street_data <- dbGetQuery(conn, paste0("SELECT * FROM plan_streets WHERE plan_id = ", safe_id))
+    # Fetch existing data safely using parameterized queries (the '?' symbol)
+    plan_data <- dbGetQuery(conn, "SELECT * FROM plans WHERE plan_id = ?", params = list(clicked_id))
+    street_data <- dbGetQuery(conn, "SELECT * FROM plan_streets WHERE plan_id = ?", params = list(clicked_id))
     
     # Fetch street list for dropdowns
-    s_list <- c("", dbReadTable(conn, "ws_streets")$street)
-    dbDisconnect(conn)
+    s_list <- c("", dbReadTable(conn, "streets")$street_name)
+    
+    # (Notice we removed the old dbDisconnect(conn) from here because on.exit handles it!)
     
     req(nrow(plan_data) > 0)
     main <- plan_data[1, ]

@@ -494,13 +494,7 @@ server <- function(input, output, session) {
     # Use cancelOutput = TRUE to prevent errors from flashing in the UI
     req(FALSE, cancelOutput = TRUE)
   })
-  # current_tenant_id <- reactive({
-  #   req(res_auth$user_info) # Check if user_info exists
-  #   
-  #   # We extract the tenant_id from the user info dataframe we fetched during login
-  #   return(res_auth$user_info$tenant_id)
-  #   print(res_auth$user_info$tenant_id)
-  # })
+  
   
   # --- NEW: MASTER ROLE CHECKER ---
   # This creates a single, safe way to check permissions throughout the app
@@ -704,21 +698,7 @@ server <- function(input, output, session) {
     
     row_id <- paste0("doc_row_", current_count)
     
-    # insertUI(
-    #   selector = "#document_upload_container",
-    #   where = "beforeEnd",
-    #   ui = tags$div(
-    #     id = row_id,
-    #     class = "row",
-    #     style = "border: 1px solid #ccc; padding: 10px; margin-bottom: 10px; border-radius: 5px; background-color: #f9f9f9;",
-    #     column(4, selectInput(paste0("doc_cat_", current_count), "Category", 
-    #                           choices = c("Plan Image", "Supporting Doc", "Permit"))),
-    #     column(6, fileInput(paste0("doc_file_", current_count), "Upload File", 
-    #                         accept = c(".pdf", ".jpg", ".png", ".tif"))),
-    #     column(2, actionButton(paste0("remove_", row_id), "Remove", icon = icon("trash"), 
-    #                            class = "btn-danger", style = "margin-top: 25px;"))
-    #   )
-    # )
+    
     
     insertUI(
       selector = "#document_upload_container",
@@ -855,33 +835,7 @@ server <- function(input, output, session) {
       # Optional: Reset the counter and clear the container for the next plan
       doc_row_counter(0)
       removeUI(selector = "#document_upload_container > div", multiple = TRUE)
-      # if (!is.null(input$plan_files)) {
-      #   # Loop through each uploaded file
-      #   for (i in 1:nrow(input$plan_files)) {
-      #     file_row <- input$plan_files[i, ]
-      #     
-      #     # Upload to AWS
-      #     res <- upload_to_s3(file_row$datapath, file_row$name, current_tenant_id(), new_plan_id)
-      #     
-      #     if (res$success) {
-      #       # Record in Database
-      #       q_doc <- "INSERT INTO plan_documents (document_id, tenant_id, plan_id, category, display_name, original_file_name, storage_provider, bucket, object_key, mime_type, size_bytes, uploaded_by) VALUES (UUID(), ?, ?, ?, ?, ?, 's3', ?, ?, ?, ?, ?)"
-      #       
-      #       # Using isolate() for user_id to prevent any reactive 'silent stops'
-      #       current_user <- isolate(res_auth$user_id) 
-      #       
-      #       dbExecute(conn, q_doc, params = list(
-      #         current_tenant_id(), new_plan_id, input$doc_category, file_row$name, 
-      #         file_row$name, res$bucket, res$key, file_row$type, 
-      #         as.numeric(file_row$size), current_user
-      #       ))
-      #     } else {
-      #       # CRITICAL: Tell the user if the AWS upload failed
-      #       showNotification(paste("Failed to upload document:", file_row$name, "-", res$error), type = "error")
-      #       print(paste("S3 Error:", res$error))
-      #     }
-      #   }
-      # }
+      
       
       
       dbCommit(conn) # Commit Transaction
@@ -1461,10 +1415,7 @@ server <- function(input, output, session) {
     on.exit(dbDisconnect(conn))
     
     # 2. Fetch Plan Details (Explicit Columns)
-    # FIX: We select ONLY the columns we need to display, avoiding 'created_at' (Timestamp)
-    # plan_sql <- "SELECT plan_number, plan_name, plan_type, department, date_on_plan, 
-    #                 cabinet_number, drawer_number, plan_in_drawer, notes 
-    #          FROM plans WHERE plan_id = ? AND tenant_id = ?"
+    
     
     plan_sql <- "SELECT *
              FROM plans WHERE plan_id = ? AND tenant_id = ?"
@@ -1591,62 +1542,7 @@ server <- function(input, output, session) {
       )
     ))
     
-    # showModal(modalDialog(
-    #   # title = paste("Plan Details:", plan$plan_number),
-    #   # size = "l", 
-    #   title = tags$div(
-    #     style = "display: flex; justify-content: space-between; align-items: center; width: 100%;",
-    #     tags$span(paste("Plan Name: ", plan$plan_name, " | Plan Number:", plan$plan_number), style = "font-weight: bold;"),
-    #     # The close button
-    #     tags$button(
-    #       type = "button", 
-    #       class = "close", 
-    #       `data-dismiss` = "modal", 
-    #       icon("times"),
-    #       style = "font-size: 24px; color: #FFFFFF; opacity: 0.7; margin-top: -5px;"
-    #     )
-    #   ),
-    #   size = "l",
-    #   easyClose = TRUE,
-    #   fade = TRUE,
-    #   fluidRow(
-    #     column(6, 
-    #            h4("Basic Information"),
-    #            #p(strong("Plan Name:"), plan$plan_name),
-    #            p(strong("Type:"), plan$plan_type),
-    #            p(strong("Department:"), plan$department),
-    #            p(strong("Date:"), plan$date_on_plan),
-    #            h4("Attached Documents"),
-    #            doc_html,
-    #            h4("Associated Streets"),
-    #            if(nrow(streets) > 0) {
-    #              HTML(paste(apply(streets, 1, function(x) paste0("<b>", x['street_name'], "</b> (", x['focus'], ")")), collapse = "<br>"))
-    #            } else {
-    #              "No streets recorded."
-    #            }
-    #     ),
-    #     column(6,
-    #            h4("Details"),
-    #            p(strong("Cabinet #: "), plan$cabinet_number),
-    #            p(strong("Drawer #: "), plan$drawer_number),
-    #            p(strong("Plan # in Drawer: "), plan$plan_in_drawer),
-    #            p(strong("# of pages"), plan$num_of_pages),
-    #            p(strong("# of sheets"), plan$num_of_sheets),
-    #            p(strong("Scale"), plan$scale),
-    #            p(strong("Consulting Firm"), plan$consulting_firm),
-    #            p(strong("Town Bid"), plan$town_bid),
-    #            p(strong("Engineer Name"), plan$engineer_name),
-    #            p(strong("Engineer Stamp #"), plan$engineer_stamp),
-    #            p(strong("Surveyor Name"), plan$surveyor_name),
-    #            p(strong("Surveyor Stamp #"), plan$surveyor_stamp),
-    #            p(strong("Content of the Plan"), plan$content_of_plan),
-    #            p(strong("Notes:"), plan$notes),
-    #            hr(),
-    #            
-    #     )
-    #   ),
-    #   footer = modalButton("Close")
-    # ))
+    
   })
   
   # =========================================================================
@@ -1678,6 +1574,33 @@ server <- function(input, output, session) {
     
     # Fetch street list for dropdowns
     s_list <- c("", dbReadTable(conn, "streets")$street_name)
+    
+    # 4. Fetch Documents (Explicit Columns)
+    # FIX: We select ONLY needed columns, avoiding 'uploaded_at' (Timestamp)
+    doc_sql <- "SELECT object_key, display_name, category 
+            FROM plan_documents WHERE plan_id = ?"
+    
+    # Execute using params instead of dbEscapeStrings
+    docs <- dbGetQuery(conn, doc_sql, params = list(clicked_id))
+    
+    # 5. Generate HTML List of Links
+    doc_html <- tags$em("No documents attached.")
+    
+    if (nrow(docs) > 0) {
+      links <- lapply(1:nrow(docs), function(i) {
+        d <- docs[i, ]
+        url <- get_s3_link(d$object_key) 
+        
+        tags$li(
+          style = "margin-bottom: 5px;",
+          tags$a(href = url, target = "_blank", class = "btn btn-default btn-xs", 
+                 icon("cloud-download"), 
+                 paste0(" ", d$display_name)),
+          tags$small(class = "text-muted", paste0(" (", d$category, ")"))
+        )
+      })
+      doc_html <- tags$ul(style = "list-style: none; padding-left: 0;", links)
+    }
     
     # (Notice we removed the old dbDisconnect(conn) from here because on.exit handles it!)
     
@@ -1715,7 +1638,16 @@ server <- function(input, output, session) {
               column(2, dateInput("edit_date_on_plan", "Date on Plan", value = main$date_on_plan))
             ),
             fluidRow(
-              column(12, textAreaInput("edit_plan_image_url", "Plan Image URL", value = main$plan_image_url, placeholder = "e.g. Folder name/Plan Name.pdf", rows = 1))
+              column(12,
+                     tags$h4("Plan Documents"),
+                     tags$div(style = "background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 15px; border-left: 4px solid #3498db;",
+                              h4(icon("file-pdf"), " Attached Documents", style = "margin-top: 0; color: #2C3E50; border-bottom: 1px solid #ddd; padding-bottom: 5px;"),
+                              doc_html
+                     ),
+                     actionButton("add_doc_row", "Add Documents", icon = icon("plus"), class = "btn-success"),
+                     tags$br(), tags$br(),
+                     tags$div(id = "document_upload_container") # This empty div will hold our dynamic rows
+              )
             )
         )
       ),
@@ -1805,7 +1737,7 @@ server <- function(input, output, session) {
     r_id <- paste0("edit_row_new_", runif(1, 1, 100000))
     
     conn <- get_db_conn()
-    s_list <- c("", dbReadTable(conn, "ws_streets")$street)
+    s_list <- c("", dbReadTable(conn, "streets")$street_name)
     dbDisconnect(conn)
     
     insertUI(selector = "#edit_modal_streets", ui = fluidRow(id = r_id,
@@ -1837,7 +1769,7 @@ server <- function(input, output, session) {
     iv_edit$enable() 
     req(iv_edit$is_valid()) 
     req(input$edit_unique_id) 
-    
+    print("trying to save edits")
     conn <- get_db_conn()
     tryCatch({
       # 1. Update Main Table

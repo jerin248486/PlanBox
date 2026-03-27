@@ -280,9 +280,9 @@ ui <- dashboardPage(
     # --- Inside dashboardSidebar ---
 sidebarMenu(
   id = "tabs",
-  menuItem("Dashboard", tabName = "dashboard", icon = icon("dashboard")),
-  menuItem("New Data Entry", tabName = "plan_form", icon = icon("plus")),
   menuItem("Search & View", tabName = "plan_data", icon = icon("search")),
+  menuItem("New Data Entry", tabName = "plan_form", icon = icon("plus")),
+  #menuItem("Dashboard", tabName = "dashboard", icon = icon("dashboard")),
   
   # New Nested Settings Menu
   menuItem("Settings", icon = icon("cog"), startExpanded = FALSE,
@@ -600,8 +600,8 @@ server <- function(input, output, session) {
   iv_edit$add_rule("edit_plan_name", sv_required())
   iv_edit$add_rule("edit_plan_type", sv_required())
   iv_edit$add_rule("edit_department", sv_required())
-  iv_edit$add_rule("edit_date_on_plan", sv_required())
-  iv_edit$add_rule("edit_plan_image_url", sv_required())
+  #iv_edit$add_rule("edit_date_on_plan", sv_required())
+  #iv_edit$add_rule("edit_plan_image_url", sv_required())
   iv_edit$add_rule("edit_scale", sv_required())
   iv_edit$add_rule("edit_num_pages", sv_required()); iv_edit$add_rule("edit_num_pages", sv_numeric())
   iv_edit$add_rule("edit_num_sheets", sv_required()); iv_edit$add_rule("edit_num_sheets", sv_numeric())
@@ -1302,8 +1302,20 @@ server <- function(input, output, session) {
               ), 
               escape = FALSE, 
               selection = "single", 
-              rownames = FALSE)
-  })
+              rownames = FALSE,
+              
+              # --- NEW: JAVASCRIPT CALLBACK ---
+              # This grabs the actual Database ID from the hidden first column
+              callback = JS("
+                table.on('click.dt', 'tbody tr', function() {
+                  var data = table.row(this).data();
+                  if (data) {
+                    Shiny.setInputValue('clicked_plan_id', data[0], {priority: 'event'});
+                  }
+                });
+              ")
+    ) 
+  }, server = FALSE)
   
   
   # --- Inside the server function ---
@@ -1399,28 +1411,20 @@ server <- function(input, output, session) {
   # =========================================================================
   # --- VIEW PLAN DETAILS (Fixed: Explicit SELECT to avoid Timestamp Warnings) ---
   # =========================================================================
-  observeEvent(input$table_rows_selected, {
-    selected_idx <- input$table_rows_selected
-    req(selected_idx)
+  observeEvent(input$clicked_plan_id, {
     
-    # 1. Get the Plan ID from the selected row
-    df <- filtered_data() 
-    selected_row <- df[selected_idx, ]
-    pk_id <- selected_row$plan_id 
+    # Grab the exact database ID directly from the click event
+    pk_id <- input$clicked_plan_id
+    req(pk_id)
     
-    # Helper to get current tenant
-    tenant_id <- current_tenant_id() 
+    tenant_id <- current_tenant_id()
     
+    print(pk_id)
     conn <- get_db_conn()
     on.exit(dbDisconnect(conn))
     
-    # 2. Fetch Plan Details (Explicit Columns)
-    
-    
-    plan_sql <- "SELECT *
-             FROM plans WHERE plan_id = ? AND tenant_id = ?"
-    
-    # Use params instead of dbEscapeStrings
+    # 2. Fetch fresh data using the exact Primary Key
+    plan_sql <- "SELECT plan_id, tenant_id, plan_number, plan_name, plan_type, department, date_on_plan, content_of_plan, notes, cabinet_number, drawer_number, plan_in_drawer, num_of_pages, num_of_sheets, scale, consulting_firm, town_bid, engineer_name, engineer_stamp, surveyor_name, surveyor_stamp FROM plans WHERE plan_id = ? AND tenant_id = ?"
     plan <- dbGetQuery(conn, plan_sql, params = list(pk_id, tenant_id))
     
     # 3. Fetch Associated Streets (Explicit Columns)
@@ -1478,7 +1482,7 @@ server <- function(input, output, session) {
       fade = TRUE,
       
       # Hidden input to store the current plan ID so the Edit button knows what to target
-      tags$div(style = "display:none;", textInput("current_view_plan_id", "", value = plan$unique_id)),
+      tags$div(style = "display:none;", textInput("current_view_plan_id", "", value = plan$plan_id)),
       
       fluidRow(
         # --- LEFT COLUMN ---
@@ -1562,7 +1566,14 @@ server <- function(input, output, session) {
     iv_edit$disable()
     
     # Parse the ID from the input string (format: "edit_123")
-    clicked_id <- sub("edit_", "", input$edit_trigger)
+    #clicked_id <- sub("edit_", "", input$edit_trigger)
+    # Grab the actual plan_id from the hidden text input in the View modal
+    clicked_id <- input$current_view_plan_id
+    
+    # Ensure it's not empty before proceeding
+    req(clicked_id) 
+    
+    #print(paste("Editing Plan ID:", clicked_id))
     
     conn <- get_db_conn()
     # SAFETY NET: Guarantee the connection closes even if an error occurs below
@@ -1757,8 +1768,10 @@ server <- function(input, output, session) {
   # =========================================================================
   observeEvent(input$save_edits, {
     
+    #print("Save Edit Button clicked")
     # --- SECURITY CHECK START ---
     user_role <- tolower(as.character(res_auth$role))
+   
     if (user_role == "viewer") {
       removeModal()
       showNotification("⛔ Permission Denied: Standard users cannot save changes.", type = "error")
@@ -1769,17 +1782,20 @@ server <- function(input, output, session) {
     iv_edit$enable() 
     req(iv_edit$is_valid()) 
     req(input$edit_unique_id) 
-    print("trying to save edits")
+    
+    print(paste("Trying to save edits for Plan ID:", input$edit_unique_id))
+    
     conn <- get_db_conn()
     tryCatch({
-      # 1. Update Main Table
-      query_main <- "UPDATE dpw.plan_data SET 
+      
+      # 1. Update Main Table (FIXED: Table name 'plans', removed 'plan_image_url')
+      query_main <- "UPDATE plans SET 
                  plan_number=?, plan_name=?, plan_type=?, department=?, 
                  date_on_plan=?, cabinet_number=?, drawer_number=?, plan_in_drawer=?, 
                  num_of_pages=?, num_of_sheets=?, scale=?, consulting_firm=?, 
                  engineer_name=?, engineer_stamp=?, surveyor_name=?, surveyor_stamp=?, 
-                 content_of_plan=?, notes=?, plan_image_url=?, town_bid=? 
-               WHERE plan_id=?"
+                 content_of_plan=?, notes=?, town_bid=? 
+                 WHERE plan_id=?"
       
       dbExecute(conn, query_main, params = list(
         input$edit_plan_number,
@@ -1800,15 +1816,14 @@ server <- function(input, output, session) {
         input$edit_surveyor_stamp,
         input$edit_content_of_plan,
         input$edit_notes,
-        gsub("\\\\", "/", input$edit_plan_image_url), # Keep your gsub, just drop dbEscapeStrings
+        # (Removed the gsub for plan_image_url here!)
         input$edit_town_bid,
         input$edit_unique_id
       ))
       
-      # 2. Update Streets (Delete old, Insert new)
-      query <- "DELETE FROM dpw.street_focus WHERE plan_id = ?"
+      # 2. Update Streets 
       
-      # Execute with params instead of paste0
+      query <- "DELETE FROM plan_streets WHERE plan_id = ?"
       dbExecute(conn, query, params = list(input$edit_unique_id))
       
       current_rows <- values$edit_dynamic_rows
@@ -1819,8 +1834,6 @@ server <- function(input, output, session) {
           
           if (!is.null(s_name) && s_name != "") {
             q_s <- "INSERT INTO plan_streets (plan_id, street_name, street_focus) VALUES (?, ?, ?)"
-            
-            
             dbExecute(conn, q_s, params = list(input$edit_unique_id, s_name, s_focus))
           }
         }
@@ -1832,6 +1845,7 @@ server <- function(input, output, session) {
       
     }, error = function(e) {
       showNotification(paste("Error saving:", e$message), type = "error")
+      print(paste("DB ERROR:", e$message))
     }, finally = {
       dbDisconnect(conn)
     })

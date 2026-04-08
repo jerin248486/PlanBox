@@ -6,7 +6,7 @@ library(shinydashboard)
 library(DT)
 library(dplyr)
 library(readxl)
-#library(RMySQL)
+
 library(RMariaDB)
 library(DBI)
 library(uuid)
@@ -1581,8 +1581,15 @@ server <- function(input, output, session) {
     
     # Fetch existing data safely using parameterized queries (the '?' symbol)
     plan_data <- dbGetQuery(conn, "SELECT * FROM plans WHERE plan_id = ?", params = list(clicked_id))
-    street_data <- dbGetQuery(conn, "SELECT * FROM plan_streets WHERE plan_id = ?", params = list(clicked_id))
     
+    # NEW FIX: JOIN with the streets table so we have the actual street_name for the dropdowns
+    query_streets <- "
+      SELECT ps.focus, s.street_name 
+      FROM plan_streets ps
+      JOIN streets s ON ps.street_id = s.street_id
+      WHERE ps.plan_id = ?
+    "
+    street_data <- dbGetQuery(conn, query_streets, params = list(clicked_id))    
     # Fetch street list for dropdowns
     s_list <- c("", dbReadTable(conn, "streets")$street_name)
     
@@ -1727,7 +1734,7 @@ server <- function(input, output, session) {
         
         insertUI(selector = "#edit_modal_streets", ui = fluidRow(id = r_id,
                                                                  column(5, selectizeInput(paste0("edit_streetname_", r_id), "Street Name:", choices = s_list, selected = street_data$street_name[i])),
-                                                                 column(5, selectizeInput(paste0("edit_streetfocus_", r_id), "Focus:", choices = c("", "Primary", "Secondary", "Tertiary"), selected = street_data$street_focus[i])),
+                                                                 column(5, selectizeInput(paste0("edit_streetfocus_", r_id), "Focus:", choices = c("", "Primary", "Secondary", "Tertiary"), selected = street_data$focus[i])),
                                                                  column(2, actionButton(paste0("delete_edit_", r_id), "", icon = icon("trash"), class = "btn-danger", style = "margin-top: 25px;"))
         ))
         
@@ -1745,18 +1752,25 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$edit_add_row, {
-    r_id <- paste0("edit_row_new_", runif(1, 1, 100000))
+    # FIX 1: Generate a clean integer ID (no decimals!)
+    r_id <- paste0("edit_row_new_", sample(1:1000000, 1))
     
+    # FIX 2: Safely fetch streets for THIS tenant only (instead of reading the whole table)
     conn <- get_db_conn()
-    s_list <- c("", dbReadTable(conn, "streets")$street_name)
-    dbDisconnect(conn)
+    s_list <- tryCatch({
+      res <- dbGetQuery(conn, "SELECT street_name FROM streets WHERE tenant_id = ? ORDER BY street_name", 
+                        params = list(current_tenant_id()))
+      c("", res$street_name)
+    }, finally = { dbDisconnect(conn) })
     
     insertUI(selector = "#edit_modal_streets", ui = fluidRow(id = r_id,
                                                              column(5, selectizeInput(paste0("edit_streetname_", r_id), "Street Name:", choices = s_list)),
                                                              column(5, selectizeInput(paste0("edit_streetfocus_", r_id), "Focus:", choices = c("", "Primary", "Secondary", "Tertiary"))),
                                                              column(2, actionButton(paste0("delete_edit_", r_id), "", icon = icon("trash"), class = "btn-danger", style = "margin-top: 25px;"))
     ))
+    
     values$edit_dynamic_rows <- c(values$edit_dynamic_rows, r_id)
+    
     observeEvent(input[[paste0("delete_edit_", r_id)]], {
       removeUI(selector = paste0("#", r_id))
       values$edit_dynamic_rows <- values$edit_dynamic_rows[!values$edit_dynamic_rows %in% r_id]
@@ -1823,6 +1837,7 @@ server <- function(input, output, session) {
       
       # 2. Update Streets 
       
+      # 2. Update Streets
       query <- "DELETE FROM plan_streets WHERE plan_id = ?"
       dbExecute(conn, query, params = list(input$edit_unique_id))
       
@@ -1833,8 +1848,19 @@ server <- function(input, output, session) {
           s_focus <- input[[paste0("edit_streetfocus_", rid)]]
           
           if (!is.null(s_name) && s_name != "") {
-            q_s <- "INSERT INTO plan_streets (plan_id, street_name, street_focus) VALUES (?, ?, ?)"
-            dbExecute(conn, q_s, params = list(input$edit_unique_id, s_name, s_focus))
+            
+            # A. Check if this street already exists for this tenant (Copied from New Plan logic)
+            res <- dbGetQuery(conn, "SELECT street_id FROM streets WHERE street_name = ? AND tenant_id = ?", 
+                              params = list(s_name, current_tenant_id()))
+            
+            # Make sure a street was actually found before trying to insert
+            if(nrow(res) > 0) {
+              st_id_to_use <- res$street_id[1]
+              
+              # D. Create the association in the junction table using the correct columns
+              q_s <- "INSERT INTO plan_streets (plan_street_id, tenant_id, plan_id, street_id, focus) VALUES (UUID(), ?, ?, ?, ?)"
+              dbExecute(conn, q_s, params = list(current_tenant_id(), input$edit_unique_id, st_id_to_use, s_focus))
+            }
           }
         }
       }
